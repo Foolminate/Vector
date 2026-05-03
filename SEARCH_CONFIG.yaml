@@ -1,0 +1,31 @@
+# Search Configuration for Project Vector
+searches:
+  - keywords: "Supply Chain Python"
+    priority: 1
+  - keywords: "Supply Chain Analytics"
+    priority: 1
+  - keywords: "Logistics Data Engineering"
+    priority: 1
+  - keywords: "Technical Product Manager Supply Chain"
+    priority: 1
+  - keywords: "Inventory Optimization Python"
+    priority: 1
+
+locations:
+  - name: "Hamilton"
+    id: "3015" # Seek Location ID for Hamilton
+    priority: 1
+  - name: "Waikato"
+    id: "1011" # Seek Location ID for Waikato
+    priority: 1
+  - name: "Remote"
+    id: "work-from-home" # Seek Location ID for Remote/WFH
+    priority: 1
+  - name: "New Zealand"
+    id: "3000" # All NZ (used for Priority 2/3 expansion)
+    priority: 2
+
+cascading_strategy:
+  enabled: true
+  start_priority: 1
+  expand_on_empty: true

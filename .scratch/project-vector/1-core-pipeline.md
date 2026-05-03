@@ -1,0 +1,48 @@
+---
+id: 1
+title: Implement Project Vector Core Pipeline
+status: needs-triage
+labels: [feature]
+---
+
+## Problem Statement
+The user is a technical professional seeking high-value roles in supply chain analytics and architecture within New Zealand. Current job boards are cluttered with "manual toil" roles (data entry, Excel-heavy admin) and management positions that lack technical depth. Furthermore, geographic constraints (preference for Hamilton/Waikato and avoidance of Auckland's cost/commute) make manual searching inefficient and frustrating.
+
+## Solution
+Project Vector: A discreet, automated job discovery and evaluation engine. It uses a cascading web scraper to gather roles from Seek.co.nz, a tiered LLM triage system to filter for technical depth vs. operational toil based on a configurable "Doctrine," and a local persistence/review workflow that delivers a daily "Architectural Opportunity" digest.
+
+## User Stories
+1. As a user, I want the system to scrape Seek.co.nz automatically, so I don't have to manually check job boards every day.
+2. As a user, I want to prioritize roles in Hamilton and Waikato, so I can find work close to home.
+3. As a user, I want to find 100% remote roles across New Zealand, so I can expand my options without a commute.
+4. As a user, I want to penalize Auckland-based roles unless they are remote, so I can avoid the high cost of living and traffic.
+5. As a user, I want a "cheap" AI to perform initial filtering, so that I keep API costs to a minimum.
+6. As a user, I want a "smart" AI to perform deep analysis only on high-quality roles, so I get high-signal insights into the technical challenges.
+7. As a user, I want the AI to distinguish between "Technical Management" (architectural impact) and "Manual Management" (Excel toil), so I only see relevant leadership roles.
+8. As a user, I want to see a daily Markdown digest of top roles, so I can quickly scan them in my code editor.
+9. As a user, I want a CLI interface to review "Edge Case" roles, so I can provide the final human judgment on borderline opportunities.
+10. As a user, I want the system to remember which jobs it has already seen, so I don't see duplicate results in my daily reports.
+11. As a user, I want to be able to tune the "Technical Doctrine" in a simple Markdown file, so I can adjust the system's "intelligence" without writing code.
+12. As a user, I want the scraper to use "stealth" techniques and random jitter, so it doesn't get blocked by job boards.
+
+## Implementation Decisions
+- **The Collector (Module):** A Playwright-based scraper with a cascading search strategy (Priority 1: Hamilton/Waikato/Remote; Priority 2: North Island; Priority 3: South Island).
+- **The Sorter (Module):** A lightweight LLM (GPT-4o-mini) that scores jobs 0-100 based on `DOCTRINE.md`.
+- **The Evaluator (Module):** A heavyweight LLM (Claude 3.5 Sonnet) that generates JSON-structured qualitative analysis for high-pass roles.
+- **Persistence (Module):** An SQLite database to store job state (New, Edge Case, Analyzed, Rejected).
+- **CLI/Workflow (Module):** Commands for `scrape`, `review`, and `digest`.
+- **Configuration:** `SEARCH_CONFIG.yaml` for search parameters and `DOCTRINE.md` for AI instructions.
+
+## Testing Decisions
+- **Scraper Validation:** Tests will ensure the scraper can correctly extract job metadata from Seek.co.nz even if minor UI changes occur.
+- **Triage Logic Testing:** Use a set of "Gold Standard" job descriptions (known True/False/Edge) to verify the Sorter and Evaluator's accuracy against the Doctrine.
+- **Persistence Testing:** Ensure no duplicate jobs are processed and state transitions (Edge -> Analyzed) are durable.
+
+## Out of Scope
+- Automated job applications.
+- Web-based User Interface (beyond Markdown/CLI).
+- Support for international job boards beyond NZ.
+- Integration with external email services (local file output only for now).
+
+## Further Notes
+The system is designed to be "discreet" and low-cost. The use of a tiered AI approach is critical to maintaining a negligible monthly API spend while achieving high-quality filtering.
