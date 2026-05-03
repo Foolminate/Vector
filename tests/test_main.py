@@ -8,82 +8,81 @@ import yaml
 from unittest.mock import MagicMock, patch
 
 @pytest.fixture
-def test_db():
-    db_path = "data/test.db"
-    if os.path.exists(db_path):
-        os.remove(db_path)
+def test_db(tmp_path):
+    db_path = str(tmp_path / "test.db")
     db = DatabaseManager(db_path)
     yield db
-    if os.path.exists(db_path):
-        os.remove(db_path)
 
 def test_collector_save_job(test_db):
     collector = SeekCollector(test_db, {})
     
     # Test saving a new job
-    collector.save_job("DevOps Engineer", "Cloud Solutions", "Waikato", "https://example.com/job1", "Experience with AWS...")
+    collector.save_job("DevOps Engineer", "Cloud Solutions", "Waikato", "https://example.com/job/123", "Experience with AWS...", "123")
     
-    conn = sqlite3.connect(test_db.db_path)
-    cursor = conn.cursor()
-    cursor.execute("SELECT job_title, status FROM jobs WHERE url = ?", ("https://example.com/job1",))
-    row = cursor.fetchone()
-    assert row is not None
-    assert row[0] == "DevOps Engineer"
-    assert row[1] == "new"
+    with test_db.get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT job_title, status, seek_job_id FROM jobs WHERE seek_job_id = ?", ("123",))
+        row = cursor.fetchone()
+        assert row is not None
+        assert row['job_title'] == "DevOps Engineer"
+        assert row['status'] == "new"
+        assert row['seek_job_id'] == "123"
     
-    # Test duplicate prevention (should not crash)
-    collector.save_job("DevOps Engineer", "Cloud Solutions", "Waikato", "https://example.com/job1", "Experience with AWS...")
-    cursor.execute("SELECT count(*) FROM jobs WHERE url = ?", ("https://example.com/job1",))
-    assert cursor.fetchone()[0] == 1
-    conn.close()
+    # Test duplicate prevention by Seek ID (should not crash)
+    collector.save_job("DevOps Engineer", "Cloud Solutions", "Waikato", "https://example.com/job/123?different_params", "Experience with AWS...", "123")
+    with test_db.get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT count(*) FROM jobs WHERE seek_job_id = ?", ("123",))
+        assert cursor.fetchone()[0] == 1
 
 def test_triage_thresholds(test_db):
     sorter = TriageSorter(test_db)
     
     # Mock data
-    job_id = 1
-    conn = sqlite3.connect(test_db.db_path)
-    cursor = conn.cursor()
-    cursor.execute("INSERT INTO jobs (job_title, status) VALUES ('Test Job', 'new')")
-    job_id = cursor.lastrowid
-    conn.commit()
-    conn.close()
+    with test_db.get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("INSERT INTO jobs (job_title, status) VALUES ('Test Job', 'new')")
+        job_id = cursor.lastrowid
+        conn.commit()
 
     # Test High-Pass
     sorter.update_job_status(job_id, {"score": 85, "rationale": "Great"})
-    conn = sqlite3.connect(test_db.db_path)
-    cursor = conn.cursor()
-    cursor.execute("SELECT status FROM jobs WHERE id = ?", (job_id,))
-    assert cursor.fetchone()[0] == "high-pass"
+    with test_db.get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT status FROM jobs WHERE id = ?", (job_id,))
+        assert cursor.fetchone()[0] == "high-pass"
     
     # Test Edge-Case
     sorter.update_job_status(job_id, {"score": 50, "rationale": "Maybe"})
-    cursor.execute("SELECT status FROM jobs WHERE id = ?", (job_id,))
-    assert cursor.fetchone()[0] == "edge-case"
+    with test_db.get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT status FROM jobs WHERE id = ?", (job_id,))
+        assert cursor.fetchone()[0] == "edge-case"
     
     # Test Rejected
     sorter.update_job_status(job_id, {"score": 20, "rationale": "No"})
-    cursor.execute("SELECT status FROM jobs WHERE id = ?", (job_id,))
-    assert cursor.fetchone()[0] == "rejected"
-    conn.close()
+    with test_db.get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT status FROM jobs WHERE id = ?", (job_id,))
+        assert cursor.fetchone()[0] == "rejected"
 
 def test_triage_logic(test_db):
     # Insert a mock job
-    conn = sqlite3.connect(test_db.db_path)
-    cursor = conn.cursor()
-    cursor.execute('''
-        INSERT INTO jobs (job_title, company, location, raw_text, status)
-        VALUES (?, ?, ?, ?, ?)
-    ''', ("Software Engineer", "Tech Corp", "Auckland", "Building automation systems", "new"))
-    job_id = cursor.lastrowid
-    conn.commit()
-    conn.close()
+    with test_db.get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO jobs (job_title, company, location, raw_text, status)
+            VALUES (?, ?, ?, ?, ?)
+        ''', ("Software Engineer", "Tech Corp", "Auckland", "Building automation systems", "new"))
+        job_id = cursor.lastrowid
+        conn.commit()
 
     # Mock the GenAI client
-    with patch('src.sorter.genai.Client') as mock_client_class:
+    with patch('src.llm_client.genai.Client') as mock_client_class:
         mock_client = mock_client_class.return_value
         mock_response = MagicMock()
         mock_response.text = '{"score": 90, "rationale": "High automation focus"}'
+        mock_response.usage_metadata.total_token_count = 50 # Real integer
         mock_client.models.generate_content.return_value = mock_response
 
         # Run triage
@@ -91,14 +90,13 @@ def test_triage_logic(test_db):
         sorter.triage_all_new()
 
         # Check database update
-        conn = sqlite3.connect(test_db.db_path)
-        cursor = conn.cursor()
-        cursor.execute("SELECT status, score, rationale FROM jobs WHERE id = ?", (job_id,))
-        row = cursor.fetchone()
-        assert row[0] == "high-pass"
-        assert row[1] == 90
-        assert row[2] == "High automation focus"
-        conn.close()
+        with test_db.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT status, score, rationale FROM jobs WHERE id = ?", (job_id,))
+            row = cursor.fetchone()
+            assert row['status'] == "high-pass"
+            assert row['score'] == 90
+            assert row['rationale'] == "High automation focus"
 
 def test_database_initialization(test_db):
     conn = sqlite3.connect(test_db.db_path)

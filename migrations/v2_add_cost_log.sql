@@ -1,0 +1,9 @@
+CREATE TABLE IF NOT EXISTS cost_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    model TEXT NOT NULL,
+    token_count INTEGER NOT NULL,
+    job_id INTEGER,
+    action TEXT,
+    FOREIGN KEY (job_id) REFERENCES jobs(id)
+);

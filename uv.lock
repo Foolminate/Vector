@@ -985,6 +985,7 @@ dependencies = [
     { name = "google-generativeai" },
     { name = "playwright" },
     { name = "playwright-stealth" },
+    { name = "tenacity" },
     { name = "textual" },
 ]
 
@@ -1001,6 +1002,7 @@ requires-dist = [
     { name = "google-generativeai", specifier = ">=0.8.6" },
     { name = "playwright", specifier = ">=1.59.0" },
     { name = "playwright-stealth", specifier = ">=2.0.3" },
+    { name = "tenacity", specifier = ">=9.1.4" },
     { name = "textual", specifier = ">=8.2.5" },
 ]
 

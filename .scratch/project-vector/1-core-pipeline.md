@@ -1,7 +1,7 @@
 ---
 id: 1
 title: Implement Project Vector Core Pipeline
-status: needs-triage
+status: completed
 labels: [feature]
 ---
 

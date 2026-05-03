@@ -1,6 +1,8 @@
 import asyncio
 import random
+import re
 import sqlite3
+import urllib.parse
 from playwright.async_api import async_playwright
 from playwright_stealth import Stealth
 
@@ -12,7 +14,7 @@ class SeekCollector:
     def __init__(self, db_manager: DatabaseManager, config: dict):
         self.db = db_manager
         self.config = config
-        self.base_url = "https://www.seek.co.nz"
+        self.base_url = "https://nz.seek.com"
         self.stealth = Stealth()
 
     async def _get_browser_context(self, playwright):
@@ -46,10 +48,13 @@ class SeekCollector:
                         if limit and jobs_count >= limit:
                             break
 
-                        loc_id = loc['id']
-                        print(f"Searching for '{keywords}' in '{loc['name']}' ({loc_id})...")
+                        loc_slug = loc['slug']
+                        print(f"Searching for '{keywords}' in '{loc['name']}' ({loc_slug})...")
                         
-                        search_url = f"{self.base_url}/jobs?keywords={keywords.replace(' ', '%20')}&where={loc_id}"
+                        # Human-readable URL format: /<role>-jobs/in-<location>
+                        keyword_slug = re.sub(r'[^a-z0-9]+', '-', keywords.lower()).strip('-')
+                        search_url = f"{self.base_url}/{keyword_slug}-jobs/in-{loc_slug}"
+                        
                         new_jobs = await self.scrape_search_results(page, search_url, limit=(limit - jobs_count) if limit else None)
                         jobs_count += new_jobs
                         
@@ -74,9 +79,9 @@ class SeekCollector:
         job_cards = await page.query_selector_all('[data-automation="normalJob"]')
         print(f"Found {len(job_cards)} job cards.")
         
-        jobs_added = 0
+        jobs_to_scrape = []
         for card in job_cards:
-            if limit and jobs_added >= limit:
+            if limit and len(jobs_to_scrape) >= limit:
                 break
 
             title_elem = await card.query_selector('[data-automation="jobTitle"]')
@@ -90,33 +95,86 @@ class SeekCollector:
             href = await title_elem.get_attribute('href')
             job_url = f"{self.base_url}{href}" if href.startswith('/') else href
             
+            # Extract Job ID
+            seek_job_id = self._extract_job_id(job_url)
+            
+            # Clean URL
+            job_url = self._clean_url(job_url)
+            
             company = await company_elem.inner_text() if company_elem else "Unknown"
             location = await location_elem.inner_text() if location_elem else "Unknown"
             
-            # Check if exists in DB
-            if self.is_already_scraped(job_url):
+            # Post-scrape location filter (Defense-in-depth against AU leakage)
+            if not self._is_valid_nz_location(location):
+                print(f"Skipping out-of-region job: {title} at {location}")
+                continue
+
+            # Check if exists in DB by Seek ID
+            if self.is_already_scraped(seek_job_id):
                 continue
                 
-            print(f"New job found: {title} at {company}")
-            
-            # Scrape details
-            raw_text = await self.scrape_job_details(page.context, job_url)
-            
-            if raw_text:
-                self.save_job(title, company, location, job_url, raw_text)
-                jobs_added += 1
-                if limit and jobs_added >= limit:
-                    break
-                await asyncio.sleep(random.uniform(1, 3))
-        
-        return jobs_added
+            jobs_to_scrape.append({
+                "title": title,
+                "company": company,
+                "location": location,
+                "url": job_url,
+                "seek_job_id": seek_job_id
+            })
 
-    def is_already_scraped(self, url):
-        conn = sqlite3.connect(self.db.db_path)
-        cursor = conn.cursor()
-        cursor.execute("SELECT id FROM jobs WHERE url = ?", (url,))
-        result = cursor.fetchone()
-        conn.close()
+        if not jobs_to_scrape:
+            return 0
+
+        print(f"Scraping details for {len(jobs_to_scrape)} new jobs concurrently...")
+        
+        semaphore = asyncio.Semaphore(3)
+        
+        async def sem_scrape(job):
+            async with semaphore:
+                print(f"Fetching details for: {job['title']}...")
+                raw_text = await self.scrape_job_details(page.context, job['url'])
+                if raw_text:
+                    self.save_job(job['title'], job['company'], job['location'], job['url'], raw_text, job['seek_job_id'])
+                    return True
+                return False
+
+        results = await asyncio.gather(*[sem_scrape(j) for j in jobs_to_scrape])
+        return sum(1 for r in results if r)
+
+    def _extract_job_id(self, url):
+        """Extract the unique integer ID from Seek URL."""
+        match = re.search(r'/job/(\d+)', url)
+        if match:
+            return match.group(1)
+        return None
+
+    def _clean_url(self, url):
+        """Strip tracking parameters from URL."""
+        if '?' in url:
+            return url.split('?')[0]
+        return url
+
+    def _is_valid_nz_location(self, location_text):
+        """Defense-in-depth: Ensure the location is not in Australia."""
+        au_indicators = [
+            "VIC", "NSW", "QLD", "WA", "SA", "TAS", "NT", "ACT",
+            "Melbourne", "Sydney", "Brisbane", "Perth", "Adelaide", "Hobart", "Canberra", "Darwin",
+            "Southbank", "Footscray", "Australia"
+        ]
+        
+        for indicator in au_indicators:
+            # Use word boundaries to avoid false positives (e.g., "WA" in "Waikato")
+            pattern = rf"\b{re.escape(indicator)}\b"
+            if re.search(pattern, location_text, re.IGNORECASE):
+                return False
+        return True
+
+    def is_already_scraped(self, seek_job_id):
+        if not seek_job_id:
+            return False
+        with self.db.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT id FROM jobs WHERE seek_job_id = ?", (seek_job_id,))
+            result = cursor.fetchone()
         return result is not None
 
     async def scrape_job_details(self, context, url):
@@ -135,20 +193,18 @@ class SeekCollector:
             await page.close()
         return None
 
-    def save_job(self, title, company, location, url, raw_text):
-        conn = sqlite3.connect(self.db.db_path)
-        cursor = conn.cursor()
-        try:
-            cursor.execute('''
-                INSERT INTO jobs (job_title, company, location, url, raw_text, status)
-                VALUES (?, ?, ?, ?, ?, 'new')
-            ''', (title, company, location, url, raw_text))
-            conn.commit()
-            self.db.log_action("scrape", f"Saved job: {title} at {company}")
-        except sqlite3.IntegrityError:
-            pass # Double check for race conditions
-        finally:
-            conn.close()
+    def save_job(self, title, company, location, url, raw_text, seek_job_id):
+        with self.db.get_connection() as conn:
+            cursor = conn.cursor()
+            try:
+                cursor.execute('''
+                    INSERT INTO jobs (job_title, company, location, url, raw_text, status, seek_job_id)
+                    VALUES (?, ?, ?, ?, ?, 'new', ?)
+                ''', (title, company, location, url, raw_text, seek_job_id))
+                conn.commit()
+                self.db.log_action("scrape", f"Saved job: {title} at {company} (ID: {seek_job_id})")
+            except sqlite3.IntegrityError:
+                pass # Double check for race conditions
 
 if __name__ == "__main__":
     config = load_config()

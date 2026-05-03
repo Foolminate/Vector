@@ -13,19 +13,23 @@ searches:
 
 locations:
   - name: "Hamilton"
-    id: "3015" # Seek Location ID for Hamilton
+    slug: "Hamilton-Waikato"
     priority: 1
   - name: "Waikato"
-    id: "1011" # Seek Location ID for Waikato
+    slug: "All-Waikato"
     priority: 1
   - name: "Remote"
-    id: "work-from-home" # Seek Location ID for Remote/WFH
+    slug: "work-from-home"
     priority: 1
   - name: "New Zealand"
-    id: "3000" # All NZ (used for Priority 2/3 expansion)
+    slug: "All-New-Zealand"
     priority: 2
 
 cascading_strategy:
   enabled: true
   start_priority: 1
   expand_on_empty: true
+
+ai_models:
+  sorter: "gemini-3-flash-preview"
+  evaluator: "gemini-3.1-pro-preview"

@@ -25,7 +25,9 @@ class JobDetail(Static):
             self.update("Select a job to view details")
             return
         
-        _, title, company, location, url, text, status, score, rationale, _, _ = job_data
+        # Unpack columns (now 12 with seek_job_id)
+        # 0:id, 1:title, 2:company, 3:location, 4:url, 5:text, 6:status, 7:score, 8:rationale, 9:analysis, 10:created, 11:seek_id
+        _, title, company, location, url, text, status, score, rationale = job_data[:9]
         
         content = f"""
 # {title}
@@ -94,11 +96,10 @@ class ReviewApp(App):
         job_list = self.query_one("#job-list", ListView)
         job_list.clear()
         
-        conn = sqlite3.connect(self.db.db_path)
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM jobs WHERE status = 'edge-case' ORDER BY score DESC")
-        jobs = cursor.fetchall()
-        conn.close()
+        with self.db.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM jobs WHERE status = 'edge-case' ORDER BY score DESC")
+            jobs = [list(row) for row in cursor.fetchall()]
 
         for job in jobs:
             job_list.append(JobItem(job))
@@ -144,11 +145,10 @@ class ReviewApp(App):
         self.refresh_list()
 
     def update_job_status(self, job_id, new_status):
-        conn = sqlite3.connect(self.db.db_path)
-        cursor = conn.cursor()
-        cursor.execute("UPDATE jobs SET status = ? WHERE id = ?", (new_status, job_id))
-        conn.commit()
-        conn.close()
+        with self.db.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("UPDATE jobs SET status = ? WHERE id = ?", (new_status, job_id))
+            conn.commit()
         self.db.log_action("human_review", f"Job {job_id} manually set to {new_status}")
 
 if __name__ == "__main__":

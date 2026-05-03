@@ -1,0 +1,48 @@
+---
+id: 7
+title: Production Readiness Improvements
+status: needs-triage
+labels: [needs-triage]
+---
+
+## Problem Statement
+
+Project Vector is an automated job discovery engine, but the current prototype lacks the resilience and scalability needed for a full, unlimited live run. Specifically, the database locks when components run concurrently, the web scraper bottlenecks by fetching job details sequentially, the LLM calls fail completely on transient network errors, and there is no observability over API token costs. Additionally, database schema changes and AI model configuration require hardcoded updates rather than configurable or automated migration paths.
+
+## Solution
+
+To stabilize the pipeline for production, the system will be refactored to support concurrent database access, batched asynchronous scraping, and fault-tolerant AI API interactions. A dedicated cost-logging mechanism will track API token usage to prevent billing surprises, and database schemas will be managed through lightweight versioned SQL migrations. The core logic for AI interaction and migrations will be extracted into testable, deep modules.
+
+## User Stories
+
+1. As an operator running an unlimited scrape, I want to fetch job detail pages in concurrent batches, so that the process completes in minutes rather than hours.
+2. As a system administrator, I want the web scraper and AI processes to execute without raising `sqlite3.OperationalError: database is locked`, so that cron jobs and manual reviews can happen concurrently.
+3. As a developer, I want the LLM evaluation agents to retry API calls on transient errors with exponential backoff, so that temporary Gemini outages do not abort the entire triage run.
+4. As a product owner, I want the system to calculate and save the token usage for every LLM call, so that I can monitor API costs and optimize models effectively.
+5. As a maintainer, I want to manage database schema updates using versioned SQL files, so that I can deploy updates cleanly without dropping data.
+6. As a configuration manager, I want the system to read LLM model IDs directly from `SEARCH_CONFIG.yaml`, so that I can switch models without touching the codebase.
+
+## Implementation Decisions
+
+- **New Deep Module: `src/llm_client.py`:** A wrapper around the Gemini API client that encapsulates the `tenacity` retry logic (exponential backoff) and extracts the `response.usage_metadata.total_token_count` for cost logging. This isolates API volatility from the `TriageSorter` and `JobEvaluator`.
+- **New Deep Module: `src/migration_runner.py`:** A dedicated module to read, track, and execute versioned SQL scripts (e.g., `migrations/v1_init.sql`, `migrations/v2_add_cost_log.sql`) against the SQLite database on initialization.
+- **Database Concurrency:** Modify `src/database.py` (`DatabaseManager`) to enable WAL (`Write-Ahead Logging`) via PRAGMA statements. Connections will use a robust context manager pattern with an appropriate busy timeout to gracefully handle concurrent locks.
+- **Scraper Async Batching:** Modify `src/collector.py` (`SeekCollector`) to use `asyncio.Semaphore(3)` and `asyncio.gather()`. Instead of sequential `await`, the scraper will process batches of detail pages concurrently while stripping out URL tracking parameters to ensure reliable deduplication.
+- **Configuration Parsing:** Update `src/config_loader.py` to expose the AI model configuration parameters, replacing the hardcoded instances in `sorter.py` and `evaluator.py`.
+
+## Testing Decisions
+
+- A good test in this repository will use Red-Green-TDD (RG-TDD) and focus on external behavioral boundaries rather than implementation specifics.
+- **Modules to be tested:** All new and heavily modified modules will be tested (`src/llm_client.py`, `src/migration_runner.py`, `src/database.py`, `src/collector.py`).
+- The `llm_client.py` tests will verify that retries trigger on simulated `503` errors and that token counts are accurately returned and formatted.
+- The `migration_runner.py` tests will verify that only unapplied SQL scripts are executed, preventing duplicate table creation errors.
+- The `collector.py` tests will verify that the semaphore strictly limits concurrent page loading to the specified max.
+- The `database.py` tests will verify that concurrent writes resolve successfully using the new context manager.
+- Prior art for testing can be found in `tests/test_evaluator.py` and `tests/test_main.py`. Mocking will be used extensively for the Gemini API responses and Playwright objects.
+
+## Out of Scope
+
+- Setting up heavy third-party observability tools (like LangSmith or Datadog); local database logging is sufficient.
+- Transitioning to a heavy ORM like SQLAlchemy; raw SQL and migrations are preferred for this scale.
+- Extracting the database from SQLite to PostgreSQL.
+- Building a message queue (e.g., Celery) for the scraper; async semaphores are adequate for the current scope.

@@ -1,0 +1,28 @@
+PRAGMA journal_mode=WAL;
+
+CREATE TABLE IF NOT EXISTS jobs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_title TEXT NOT NULL,
+    company TEXT,
+    location TEXT,
+    url TEXT UNIQUE,
+    raw_text TEXT,
+    status TEXT DEFAULT 'new',
+    score INTEGER,
+    rationale TEXT,
+    analysis_json TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS audit_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    action TEXT NOT NULL,
+    details TEXT
+);
+
+CREATE TABLE IF NOT EXISTS migrations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT UNIQUE NOT NULL,
+    applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);

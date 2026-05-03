@@ -61,7 +61,15 @@ def main():
         app.run()
 
     elif args.command == "digest":
-        print("Digest command not yet implemented.")
+        print("Starting evaluation and digest generation...")
+        from .evaluator import JobEvaluator
+        evaluator = JobEvaluator(db)
+        evaluator.evaluate_all_new()
+        report_path = evaluator.generate_digest()
+        if report_path:
+            print(f"Digest generated successfully: {report_path}")
+        else:
+            print("No jobs found to include in digest.")
 
     else:
         parser.print_help()
