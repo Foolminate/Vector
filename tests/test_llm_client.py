@@ -56,3 +56,21 @@ def test_llm_client_retries_on_error(mock_db):
                 result = client.generate_json("test prompt")
                 assert result["ok"] is True
                 assert mock_client.models.generate_content.call_count == 3
+
+def test_llm_client_handles_list_response(mock_db):
+    with patch('google.genai.Client') as mock_genai:
+        mock_client = MagicMock()
+        mock_genai.return_value = mock_client
+        
+        mock_response = MagicMock()
+        mock_response.text = '[{"score": 85, "rationale": "Wrapped in list"}]'
+        mock_response.usage_metadata.total_token_count = 50
+        mock_client.models.generate_content.return_value = mock_response
+        
+        with patch.dict('os.environ', {'GEMINI_VECTOR_API_KEY': 'fake-key'}):
+            client = LLMClient(mock_db, "test-model")
+            result = client.generate_json("test prompt")
+            
+            assert isinstance(result, dict)
+            assert result["score"] == 85
+            assert result["rationale"] == "Wrapped in list"

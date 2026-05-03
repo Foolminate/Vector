@@ -35,7 +35,16 @@ class LLMClient:
                 tokens = response.usage_metadata.total_token_count
                 self._log_cost(tokens, job_id, action)
             
-            return json.loads(response.text)
+            data = json.loads(response.text)
+            
+            # Handle cases where the model wraps the response in a list
+            if isinstance(data, list) and len(data) > 0:
+                data = data[0]
+            
+            if not isinstance(data, dict):
+                print(f"Warning: LLM returned non-dict JSON: {type(data)}")
+                
+            return data
         except Exception as e:
             print(f"LLM Error (Model: {self.model_id}): {e}")
             raise # Let tenacity handle retries

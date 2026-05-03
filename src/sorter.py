@@ -67,7 +67,11 @@ Return your response in strict JSON format:
         except Exception:
             return None
 
-    def update_job_status(self, job_id: int, result: Dict[str, Any]):
+    def update_job_status(self, job_id: int, result: Any):
+        if not isinstance(result, dict):
+            print(f"Error: Expected dictionary for triage result, got {type(result)}")
+            return
+
         score = result.get('score', 0)
         rationale = result.get('rationale', "No rationale provided")
         
