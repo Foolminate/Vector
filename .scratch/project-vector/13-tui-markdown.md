@@ -1,0 +1,20 @@
+# Issue: TUI Markdown Detail View
+
+## Labels
+`enhancement`, `ready-for-agent`
+
+## Parent
+[.scratch/project-vector/12-tui-enhancements.md](.scratch/project-vector/12-tui-enhancements.md)
+
+## What to build
+Replace the current static text detail pane in `src/review_tui.py` with a rich-text Markdown viewer. This will allow the TUI to render job descriptions and AI rationales with proper formatting (bold, headings, lists).
+
+## Acceptance criteria
+- [x] `JobDetail` class in `src/review_tui.py` uses Textual's `Markdown` widget.
+- [x] Job titles are rendered as H1 or H2 headings.
+- [x] AI Rationale section is clearly demarcated with a heading.
+- [x] URLs are rendered and remain accessible (via 'O' keybind).
+- [x] Existing TUI tests pass or are updated to reflect the widget change.
+
+## Blocked by
+None - can start immediately

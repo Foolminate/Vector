@@ -44,6 +44,31 @@ def test_job_evaluation_logic(test_db):
         assert "Optimize pipelines" in analysis_json
         conn.close()
 
+def test_generate_digest_with_notes(test_db):
+    evaluator = JobEvaluator(test_db)
+    
+    # Mock data has one job, let's give it an analysis_json AND notes
+    conn = sqlite3.connect(test_db.db_path)
+    cursor = conn.cursor()
+    cursor.execute('''
+        UPDATE jobs SET analysis_json = ?, notes = ? WHERE job_title = ?
+    ''', ('{"technical_depth": "Test", "architectural_opportunities": ["Opp1"], "remote_status": "Verified"}', 
+          "Great commute, needs Go knowledge.", "Senior Data Architect"))
+    conn.commit()
+    conn.close()
+    
+    digest_path = evaluator.generate_digest("test_digests_notes")
+    assert digest_path is not None
+    
+    with open(digest_path, 'r') as f:
+        content = f.read()
+        assert "Human Notes" in content
+        assert "Great commute, needs Go knowledge." in content
+    
+    # Clean up
+    os.remove(digest_path)
+    os.rmdir("test_digests_notes")
+
 def test_generate_digest(test_db):
     evaluator = JobEvaluator(test_db)
     

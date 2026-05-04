@@ -35,3 +35,18 @@ class DatabaseManager:
         with self.get_connection() as conn:
             conn.execute('INSERT INTO audit_log (action, details) VALUES (?, ?)', (action, details))
             conn.commit()
+
+    def log_suggestion(self, keywords, source_keyword, total_jobs):
+        """Logs or updates a related search suggestion."""
+        with self.get_connection() as conn:
+            try:
+                conn.execute('''
+                    INSERT INTO search_suggestions (keywords, source_keyword, total_jobs)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(keywords) DO UPDATE SET
+                        total_jobs = excluded.total_jobs,
+                        discovered_at = CURRENT_TIMESTAMP
+                ''', (keywords, source_keyword, total_jobs))
+                conn.commit()
+            except sqlite3.Error as e:
+                print(f"Database error logging suggestion: {e}")

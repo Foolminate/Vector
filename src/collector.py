@@ -69,15 +69,70 @@ class SeekCollector:
 
     async def scrape_search_results(self, page, url, limit=None):
         await page.goto(url)
-        # Wait for job cards to load
+        
+        # GUARD 1: Check if we are actually on Seek (not blocked)
+        if not await page.query_selector('[data-automation="seek"]'):
+            print(f"FAILED: Page integrity check failed for {url}. Possible bot detection.")
+            return 0
+
+        # Wait for Seek to settle its Redux state
+        # Logic: If already settled (isLoading=false) and has data (jobIds or jobsCount), proceed.
+        # Otherwise, wait for it to flip-flop.
         try:
-            await page.wait_for_selector('[data-automation="normalJob"]', timeout=10000)
+            await page.wait_for_function("""
+                window.SEEK_REDUX_DATA && 
+                window.SEEK_REDUX_DATA.results.isLoading === false
+            """, timeout=10000)
         except Exception:
-            print("No job cards found on this page.")
+            print(f"Timeout waiting for Seek state to settle on {url}")
+
+        # Extract Redux data for advanced filtering and discovery
+        redux = await page.evaluate("window.SEEK_REDUX_DATA")
+        results = redux.get('results', {})
+        
+        # GUARD 2: Handle Seek search errors
+        if results.get('isError'):
+            print(f"Seek reported a search error for {url}")
+            return 0
+
+        # GUARD 3: Fast-fail if zero results (using Redux state)
+        jobs_count_total = redux.get('results', {}).get('totalCount', 0)
+        if jobs_count_total == 0:
+            # Fallback to SK_DL if Redux results is sparse
+            jobs_count_total = await page.evaluate("window.SK_DL ? window.SK_DL.jobsCount : 0")
+
+        if jobs_count_total == 0:
+            print(f"Zero results for {url}")
+            return 0
+
+        # PRE-FILTER: Check if all IDs on this page are already in DB
+        job_ids = results.get('jobIds', [])
+        if job_ids:
+            with self.db.get_connection() as conn:
+                cursor = conn.cursor()
+                placeholders = ','.join(['?'] * len(job_ids))
+                cursor.execute(f"SELECT seek_job_id FROM jobs WHERE seek_job_id IN ({placeholders})", job_ids)
+                existing_ids = {row['seek_job_id'] for row in cursor.fetchall()}
+            
+            if len(existing_ids) >= len(job_ids):
+                print(f"All {len(job_ids)} jobs on this page are already in the database. Skipping DOM scrape.")
+                return 0
+
+        # LOG SUGGESTIONS: Capture related searches for AI discovery
+        related = results.get('relatedSearches', [])
+        source_keyword = redux.get('results', {}).get('locationWhere', 'Unknown') # or extract from URL
+        for item in related:
+            self.db.log_suggestion(item.get('keywords'), source_keyword, item.get('totalJobs'))
+
+        # Wait for job cards to load (broad selector)
+        try:
+            await page.wait_for_selector('[data-automation$="Job"]', timeout=5000)
+        except Exception:
+            print("No job cards found in DOM after state settlement.")
             return 0
         
-        job_cards = await page.query_selector_all('[data-automation="normalJob"]')
-        print(f"Found {len(job_cards)} job cards.")
+        job_cards = await page.query_selector_all('[data-automation$="Job"]')
+        print(f"Found {len(job_cards)} job cards in DOM.")
         
         jobs_to_scrape = []
         for card in job_cards:

@@ -133,6 +133,9 @@ Return your response in strict JSON format:
                         f.write(f"- {flag}\n")
                     f.write("\n")
                 
+                if job.get('notes'):
+                    f.write(f"### Human Notes\n{job['notes']}\n\n")
+
                 f.write("---\n\n")
         
         # Mark jobs as analyzed
