@@ -47,8 +47,13 @@ You are Agent 2 (The Evaluator) in Project Vector. Your task is to perform a dee
 ### Instructions:
 Analyze the job for technical depth, architectural opportunities, and potential red flags. Be critical and look for signals of genuine technical impact versus manual toil.
 
+Based on your analysis, provide a verdict:
+- "shortlisted": High architectural opportunity, manageable red flags.
+- "discarded": Low technical depth or critical red flags (e.g., pure legacy maintenance).
+
 Return your response in strict JSON format:
 {{
+  "verdict": "shortlisted | discarded",
   "technical_depth": "Summary of technical challenges and impact",
   "architectural_opportunities": ["Opportunity 1", "Opportunity 2"],
   "red_flags": ["Concern 1", "Concern 2"],
@@ -62,14 +67,15 @@ Return your response in strict JSON format:
 
     def save_evaluation(self, job_id: int, result: Dict[str, Any]):
         analysis_json = json.dumps(result)
+        status = result.get("verdict", "analyzed")
         
         with self.db.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute('''
                 UPDATE jobs 
-                SET analysis_json = ?
+                SET analysis_json = ?, evaluated_at = CURRENT_TIMESTAMP, status = ?, last_decision_by = 'robot'
                 WHERE id = ?
-            ''', (analysis_json, job_id))
+            ''', (analysis_json, status, job_id))
             conn.commit()
         
         self.db.log_action("evaluation", f"Deep analysis completed for job {job_id}")
@@ -78,71 +84,28 @@ Return your response in strict JSON format:
         if not os.path.exists(output_dir):
             os.makedirs(output_dir)
             
-        with self.db.get_connection() as conn:
-            cursor = conn.cursor()
-            # Fetch all jobs that have analysis_json and are in high-pass status
-            cursor.execute("SELECT * FROM jobs WHERE status = 'high-pass' AND analysis_json IS NOT NULL")
-            jobs = [dict(row) for row in cursor.fetchall()]
+        from .digest_manager import DigestManager
+        dm = DigestManager(self.db)
         
-        if not jobs:
+        # Get the latest evaluation date
+        dates = dm.get_available_dates()
+        if not dates:
             return None
             
-        # Priority Sorting: Hamilton/Waikato/Remote first
-        def priority_score(job):
-            location = job['location'].lower()
-            analysis = json.loads(job['analysis_json'])
-            remote = analysis.get('remote_status', '').lower()
-            
-            score = 0
-            if "hamilton" in location or "waikato" in location:
-                score += 10
-            if remote == "verified":
-                score += 10
-            elif remote == "likely":
-                score += 5
-            return score
-
-        jobs.sort(key=priority_score, reverse=True)
+        latest_date = dates[0]
+        markdown = dm.render_digest(latest_date)
         
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"digest_{timestamp}.md"
         filepath = os.path.join(output_dir, filename)
         
         with open(filepath, 'w') as f:
-            f.write(f"# Project Vector: Architectural Opportunity Digest\n")
-            f.write(f"Generated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
-            
-            for job in jobs:
-                analysis = json.loads(job['analysis_json'])
-                f.write(f"## {job['job_title']} @ {job['company']}\n")
-                f.write(f"- **Location:** {job['location']}\n")
-                f.write(f"- **Score:** {job['score']}\n")
-                f.write(f"- **Remote:** {analysis.get('remote_status')}\n")
-                f.write(f"- **URL:** {job['url']}\n\n")
-                
-                f.write(f"### Technical Depth\n{analysis.get('technical_depth')}\n\n")
-                
-                f.write(f"### Architectural Opportunities\n")
-                for opp in analysis.get('architectural_opportunities', []):
-                    f.write(f"- {opp}\n")
-                f.write("\n")
-                
-                if analysis.get('red_flags'):
-                    f.write(f"### Red Flags\n")
-                    for flag in analysis.get('red_flags', []):
-                        f.write(f"- {flag}\n")
-                    f.write("\n")
-                
-                if job.get('notes'):
-                    f.write(f"### Human Notes\n{job['notes']}\n\n")
-
-                f.write("---\n\n")
+            f.write(markdown)
         
-        # Mark jobs as analyzed
+        # Mark jobs as analyzed (only those evaluated on the latest_date)
         with self.db.get_connection() as conn:
             cursor = conn.cursor()
-            for job in jobs:
-                cursor.execute("UPDATE jobs SET status = 'analyzed' WHERE id = ?", (job['id'],))
+            cursor.execute("UPDATE jobs SET status = 'analyzed' WHERE DATE(evaluated_at) = ?", (latest_date,))
             conn.commit()
         
         return filepath

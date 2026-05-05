@@ -85,7 +85,7 @@ Return your response in strict JSON format:
             cursor = conn.cursor()
             cursor.execute('''
                 UPDATE jobs 
-                SET status = ?, score = ?, rationale = ?
+                SET status = ?, score = ?, rationale = ?, last_decision_by = 'robot'
                 WHERE id = ?
             ''', (status, score, rationale, job_id))
             conn.commit()

@@ -25,7 +25,7 @@ def test_job_evaluation_logic(test_db):
     with patch('src.llm_client.genai.Client') as mock_client_class:
         mock_client = mock_client_class.return_value
         mock_response = MagicMock()
-        mock_response.text = '{"technical_depth": "Deep focus on ETL", "architectural_opportunities": ["Optimize pipelines"], "red_flags": [], "remote_status": "Likely"}'
+        mock_response.text = '{"verdict": "shortlisted", "technical_depth": "Deep focus on ETL", "architectural_opportunities": ["Optimize pipelines"], "red_flags": [], "remote_status": "Likely"}'
         mock_response.usage_metadata.total_token_count = 100 # Real integer
         mock_client.models.generate_content.return_value = mock_response
 
@@ -37,7 +37,7 @@ def test_job_evaluation_logic(test_db):
         # Check database update
         conn = sqlite3.connect(test_db.db_path)
         cursor = conn.cursor()
-        cursor.execute("SELECT analysis_json FROM jobs WHERE status = 'high-pass'")
+        cursor.execute("SELECT analysis_json FROM jobs WHERE status = 'shortlisted'")
         analysis_json = cursor.fetchone()[0]
         assert analysis_json is not None
         assert "Deep focus on ETL" in analysis_json
@@ -47,11 +47,11 @@ def test_job_evaluation_logic(test_db):
 def test_generate_digest_with_notes(test_db):
     evaluator = JobEvaluator(test_db)
     
-    # Mock data has one job, let's give it an analysis_json AND notes
+    # Mock data has one job, let's give it an analysis_json AND notes AND evaluated_at
     conn = sqlite3.connect(test_db.db_path)
     cursor = conn.cursor()
     cursor.execute('''
-        UPDATE jobs SET analysis_json = ?, notes = ? WHERE job_title = ?
+        UPDATE jobs SET analysis_json = ?, notes = ?, evaluated_at = CURRENT_TIMESTAMP WHERE job_title = ?
     ''', ('{"technical_depth": "Test", "architectural_opportunities": ["Opp1"], "remote_status": "Verified"}', 
           "Great commute, needs Go knowledge.", "Senior Data Architect"))
     conn.commit()
@@ -72,11 +72,11 @@ def test_generate_digest_with_notes(test_db):
 def test_generate_digest(test_db):
     evaluator = JobEvaluator(test_db)
     
-    # Mock data has one job, let's give it an analysis_json manually
+    # Mock data has one job, let's give it an analysis_json manually AND evaluated_at
     conn = sqlite3.connect(test_db.db_path)
     cursor = conn.cursor()
     cursor.execute('''
-        UPDATE jobs SET analysis_json = ? WHERE job_title = ?
+        UPDATE jobs SET analysis_json = ?, evaluated_at = CURRENT_TIMESTAMP WHERE job_title = ?
     ''', ('{"technical_depth": "Test", "architectural_opportunities": ["Opp1"], "remote_status": "Verified"}', "Senior Data Architect"))
     conn.commit()
     conn.close()

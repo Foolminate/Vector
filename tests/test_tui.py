@@ -75,7 +75,7 @@ async def test_review_app_staged_decisions(test_db):
         first_item = job_list.children[0]
         assert isinstance(first_item, JobItem)
         assert first_item.staged_status == 'high-pass'
-        assert "[P]" in first_item.get_label_text()
+        assert "⬆️" in first_item.get_label_text()
 
         await pilot.press("ctrl+s")
         

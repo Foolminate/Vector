@@ -68,7 +68,7 @@ class SeekCollector:
                 await browser.close()
 
     async def scrape_search_results(self, page, url, limit=None):
-        await page.goto(url)
+        await page.goto(url, wait_until="networkidle")
         
         # GUARD 1: Check if we are actually on Seek (not blocked)
         if not await page.query_selector('[data-automation="seek"]'):
@@ -76,18 +76,38 @@ class SeekCollector:
             return 0
 
         # Wait for Seek to settle its Redux state
-        # Logic: If already settled (isLoading=false) and has data (jobIds or jobsCount), proceed.
-        # Otherwise, wait for it to flip-flop.
         try:
             await page.wait_for_function("""
-                window.SEEK_REDUX_DATA && 
-                window.SEEK_REDUX_DATA.results.isLoading === false
+                (window.SEEK_REDUX_DATA && window.SEEK_REDUX_DATA.results.isLoading === false) ||
+                document.querySelector('script[data-automation="server-state"]')
             """, timeout=10000)
         except Exception:
-            print(f"Timeout waiting for Seek state to settle on {url}")
+            pass # We'll try extraction anyway
 
         # Extract Redux data for advanced filtering and discovery
         redux = await page.evaluate("window.SEEK_REDUX_DATA")
+        
+        if not redux:
+            # Fallback: Extract from script tag
+            script_content = await page.evaluate("""() => {
+                const script = document.querySelector('script[data-automation="server-state"]');
+                return script ? script.textContent : null;
+            }""")
+            
+            if script_content:
+                # Use regex to find SEEK_REDUX_DATA = { ... };
+                match = re.search(r'window\.SEEK_REDUX_DATA\s*=\s*(\{.*?\});', script_content, re.DOTALL)
+                if match:
+                    try:
+                        import json
+                        redux = json.loads(match.group(1))
+                    except Exception:
+                        pass
+
+        if not redux:
+            print(f"FAILED: No SEEK_REDUX_DATA found on {url}")
+            return 0
+            
         results = redux.get('results', {})
         
         # GUARD 2: Handle Seek search errors
@@ -252,9 +272,10 @@ class SeekCollector:
         with self.db.get_connection() as conn:
             cursor = conn.cursor()
             try:
+                # Set default expiration to 30 days from now
                 cursor.execute('''
-                    INSERT INTO jobs (job_title, company, location, url, raw_text, status, seek_job_id)
-                    VALUES (?, ?, ?, ?, ?, 'new', ?)
+                    INSERT INTO jobs (job_title, company, location, url, raw_text, status, seek_job_id, expiration_date)
+                    VALUES (?, ?, ?, ?, ?, 'new', ?, datetime('now', '+30 days'))
                 ''', (title, company, location, url, raw_text, seek_job_id))
                 conn.commit()
                 self.db.log_action("scrape", f"Saved job: {title} at {company} (ID: {seek_job_id})")
