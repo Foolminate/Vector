@@ -1,93 +1,87 @@
-# System Design Document: Project Vector
-**Status:** Baseline Specification (Aligned)
+# Project Vector: Technical Specification & System Design Document (SDD)
 
-## 1. Executive Summary
-Project Vector is an automated job discovery engine designed to filter high-value technical supply chain and analytics roles from generic operational positions. It uses a tiered AI pipeline to balance cost efficiency with deep qualitative analysis.
+## 1. System Architecture Overview
+Project Vector is a dual-stage, agentic pipeline designed to automate the discovery and qualitative evaluation of technical supply chain and analytics roles. It prioritizes deterministic reliability in scraping and cost-efficient probabilistic evaluation through tiered LLM orchestration.
 
-## 2. Core Architecture
-The system follows a **Scrape -> Triage -> Analyze -> Persist** flow.
-
-### 2.1 The Collector (Web Scraper)
-*   **Technology:** Python 3.13 + Playwright (Headless Browser).
-*   **Target:** Initially Seek.co.nz (New Zealand).
-*   **Search Strategy (Cascading):**
-    *   **Priority 1:** Greater Hamilton, Waikato, and 100% Remote (NZ-wide).
-    *   **Priority 2:** Rest of North Island (Excluding Auckland preference).
-    *   **Priority 3:** South Island (Expansion tier).
-*   **Configuration:** `SEARCH_CONFIG.yaml` will define keywords, location IDs, and expansion toggles.
-*   **Logic:**
-    *   Bypasses basic bot detection using stealth configurations.
-    *   Implements random jitter (1-5s) to avoid detection.
-    *   Extracts: `job_title`, `company`, `location`, `raw_description_text`, `url`, `posting_date`.
-
-### 2.2 The Triage Pipeline (Agent 1 & Agent 2)
-Both agents are governed by `DOCTRINE.md`.
-
-*   **Agent 1: The Sorter (Cost-Optimized)**
-    *   **Model:** `gpt-4o-mini` or equivalent.
-    *   **Input:** Raw job description + Doctrine.
-    *   **Output:** JSON {`score`: 0-100, `rationale`: "String"}.
-    *   **Action Paths:**
-        *   **High-Pass (>=80):** Immediate promotion to Agent 2.
-        *   **Edge Case (40-79):** Saved for Human Review via CLI.
-        *   **Low-Pass (<40):** Logged to DB, otherwise ignored.
-
-*   **Agent 2: The Evaluator (Reasoning)**
-    *   **Model:** `claude-3-5-sonnet` or `gpt-4o`.
-    *   **Trigger:** High-Pass results or Human-Promoted Edge Cases.
-    *   **Function:** Deep qualitative analysis.
-    *   **Output:** Validated JSON (see Schema in Section 3).
-
-## 3. Data Schema & Persistence
-*   **Database:** SQLite (`vector.db`).
-*   **Tables:**
-    *   `jobs`: Stores raw scraped data, triage scores, and final analysis.
-    *   `audit_log`: Tracks scrape runs and API costs.
-
-### JSON Output Schema (Final)
-```json
-{
-  "job_title": "String",
-  "company_name": "String",
-  "url": "String",
-  "overlap_score": "Integer (1-10)",
-  "key_tech_stack": ["String"],
-  "red_flags": ["String"],
-  "architectural_opportunity": "String (One-sentence summary)"
-}
-```
-
-## 4. Operational Workflow
-1.  **Run Scraper:** `python main.py scrape`
-2.  **Review Edge Cases:** `python main.py review` (CLI interactive prompt).
-3.  **Generate Digest:** `python main.py digest` (Exports `digests/YYYY-MM-DD_report.md`).
-
-## 5. Technical Doctrine (`DOCTRINE.md`)
-The system prompts are constructed by reading this file.
-*   **Positive Weight (Scale):** Automation, Architecture, Strategy, Systems Design, ETL, Data Modeling.
-*   **Negative Weight (Toil):** Data Entry, Manual Reconciliation, Excel-only reporting, Routine Admin.
-*   **Geographic Weights:**
-    *   **Reward:** Hamilton/Waikato (Bonus to `overlap_score`).
-    *   **Penalty:** Auckland (Heavy penalty unless "100% Remote" is explicitly verified).
-    *   **Neutral:** Other NZ regions.
-
-## 6. Data Flow Diagram (Mermaid)
+### Data Flow Diagram (Mermaid.js)
 ```mermaid
 graph TD
-    A[Seek Scraper] -->|Raw Data| B{Already in DB?}
-    B -->|No| C[Agent 1: Sorter]
-    B -->|Yes| Z[Skip]
-    C -->|Score >= 80| D[Agent 2: Evaluator]
-    C -->|Score 40-79| E[Human Review CLI]
-    C -->|Score < 40| F[Rejected]
-    E -->|Approved| D
-    D -->|JSON| G[Markdown Digest]
-    D -->|JSON| H[SQLite Persistence]
+    A[Seek Scraper - Deterministic] -->|Raw Text + Metadata| B[(SQLite DB)]
+    B -->|New Jobs| C[Agent 1: The Sorter]
+    C -->|Score < 40| D[Rejected Bucket]
+    C -->|Score 40-79| E[Edge-Case Bucket]
+    C -->|Score >= 80| F[Agent 2: The Evaluator]
+    
+    E -->|Manual Review| G[Review TUI]
+    F -->|JSON Analysis| B
+    
+    G -->|Force Evaluation 'D'| F
+    G -->|Daily Review| H[Daily Markdown Digest]
+    
+    D -->|30 Day TTL| I[Purge/Delete]
 ```
 
-## 7. Next Steps (Implementation Roadmap)
-1.  Initialize `DOCTRINE.md`.
-2.  Set up SQLite schema.
-3.  Implement Playwright scraper for Seek.
-4.  Implement Agent 1 Triage logic.
-5.  Implement CLI Review & Markdown generation.
+## 2. Recommended Tech Stack
+- **Language:** Python 3.12+ (managed via `uv`).
+- **Scraper:** `httpx` for requests, `BeautifulSoup4` for deterministic parsing.
+- **Database:** `SQLite` (local, lightweight, supports JSON types).
+- **TUI:** `Textual` (for high-fidelity dashboard and background workers).
+- **LLM Client:** LiteLLM or direct SDKs for Gemini/OpenAI.
+- **Environment:** `.env` for API keys and configuration.
+
+## 3. The "Doctrine" System Prompts
+
+### Agent 1 (The Sorter) - Triage Prompt
+> **Role:** Technical Triage Officer.
+> **Input:** Job Title, Company, Location, Raw Description.
+> **Logic:** Evaluate against DOCTRINE.md. 
+> **Scoring:** 
+> - 80+: High-impact technical/architectural roles.
+> - 40-79: Technical roles with potential manual overhead (Edge-Case).
+> - <40: Purely manual, administrative, or non-technical finance roles.
+> **Output:** `{"score": int, "rationale": "string"}`
+
+### Agent 2 (The Evaluator) - Synthesis Prompt
+> **Role:** Senior Technical Architect.
+> **Goal:** Extract qualitative value and verify technical depth.
+> **Output Requirements:** Must return the following JSON structure:
+> ```json
+> {
+>   "verdict": "shortlisted | discarded",
+>   "overlap_score": 1-10,
+>   "role_type": "string",
+>   "technical_depth": "2-3 sentence summary",
+>   "architectural_opportunities": ["list"],
+>   "key_tech_stack": ["list"],
+>   "red_flags": ["list"],
+>   "remote_status": "Verified | Likely | Unlikely"
+> }
+> ```
+
+## 4. Implementation Strategies
+
+### 4.1. Deterministic Scraper (Seek Module)
+- **Constraint:** Fail-fast. If the CSS selector for the job description fails, the script must raise a `SelectorNotFoundError` and terminate.
+- **Rate-Limiting:** Implement a random jitter (2-5 seconds) between requests to mimic human browsing behavior and avoid IP blocking.
+- **Metadata Extraction:** Prioritize extracting `published_at` to calculate the `expiration_date`.
+
+### 4.2. Database Schema (SQLite)
+- `jobs` table:
+    - `id` (PK)
+    - `external_id` (Unique - from Seek)
+    - `status` (`new`, `high-pass`, `edge-case`, `rejected`, `shortlisted`, `discarded`)
+    - `last_decision_by` (`robot`, `human`)
+    - `expiration_date` (DATETIME)
+    - `raw_text` (TEXT)
+    - `analysis_json` (JSON/TEXT)
+    - `created_at` (TIMESTAMP)
+
+### 4.3. Lifecycle Management (The "Clean Sweep")
+- A standalone maintenance script (or TUI background worker) executes:
+  `DELETE FROM jobs WHERE expiration_date < CURRENT_TIMESTAMP AND status IN ('rejected', 'discarded');`
+- This ensures that if a rejected job is reposted *after* 30 days, it is treated as a fresh discovery.
+
+## 5. Edge Cases & Risks
+- **Duplicate Listings:** Handle via `external_id` uniqueness.
+- **LLM JSON Failure:** Wrap LLM calls in a retry loop with a "Repair Prompt" if the JSON is malformed.
+- **UI Drift:** Scraper must be unit-tested against saved HTML snapshots of Seek pages to detect breaking changes immediately.

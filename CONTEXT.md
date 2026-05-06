@@ -18,24 +18,30 @@ The system is currently proposed to operate on a dual-stage pipeline to balance 
     *   Function: Extracts raw job description text, title, URL, and metadata based on broad boolean logic (e.g., "Supply Chain" AND "Python").
 *   **Agent 1: The Sorter (Cost-Optimized AI - For Review):**
     *   Proposed Model: Lightweight/fast LLM (e.g., GPT-4o-mini or Claude 3 Haiku).
-    *   Function: Rapid triage. Evaluates raw text to return a strict True/False boolean based on foundational Doctrine (DOC). *(Discussion Point: Ensure we have consensus on what defines "actual technical architecture or data engineering" vs. an "Excel-based role disguised as analytics")*.
+    *   Function: Rapid triage. Evaluates raw text against the Technical Doctrine to assign a score (0-100).
+    *   States:
+        *   **High-Pass (>=80):** Automatically triggers Agent 2.
+        *   **Edge-Case (40-79):** Held for manual human review in the TUI.
+        *   **Rejected (<40):** Discarded.
 *   **Agent 2: The Evaluator & Synthesizer (Reasoning AI - For Review):**
     *   Proposed Model: Heavyweight LLM (e.g., Claude 3.5 Sonnet or GPT-4o).
     *   Function: Triggered only if Agent 1 returns 'True'. Performs deep qualitative analysis of the job description.
     *   Output: Forces the analysis into a strict, validated JSON schema (schema to be finalized in alignment).
 
-## 3. Draft JSON Output Schema
-The final output from Agent 2 is provisionally structured as follows, pending final alignment:
-*   `job_title`: String
-*   `company_name`: String (if available)
-*   `url`: String
-*   `overlap_score`: Integer (1-10, based on alignment with technical product management or supply chain analytics)
-*   `key_tech_stack`: Array of Strings (e.g., ["Python", "SQL", "PowerBI"])
-*   `red_flags`: Array of Strings (e.g., ["Requires CPA", "Focuses purely on manual entry"])
-*   `architectural_opportunity`: String (A one-sentence summary of the core technical challenge the role offers).
+## 3. Finalized JSON Output Schema (Agent 2)
+The output from Agent 2 is structured to facilitate rapid human decision-making:
+*   `verdict`: String (`shortlisted` | `discarded`)
+*   `overlap_score`: Integer (1-10)
+*   `role_type`: String (e.g., "Technical PM", "Data Engineer", "Supply Chain Analyst")
+*   `technical_depth`: String (2-3 sentence technical summary)
+*   `architectural_opportunities`: Array of Strings
+*   `key_tech_stack`: Array of Strings
+*   `red_flags`: Array of Strings
+*   `remote_status`: String (`Verified` | `Likely` | `Unlikely`)
 
 ## 4. Provisional Operational Requirements & Constraints
-*   **Cost Containment Strategy:** The system must strictly enforce the Agent 1 triage to prevent the heavyweight Agent 2 from processing junk data, with the goal of keeping monthly API costs negligible. *(Tolerance to be discussed)*.
+*   **Cost Containment Strategy:** The system must strictly enforce the Agent 1 triage to prevent the heavyweight Agent 2 from processing junk data. Manual "Force Evaluation" in the TUI allows surgical overrides of Agent 1 decisions.
+*   **Job Lifecycle (Clean Sweep):** The database serves as a temporary suppression list. Rejected or discarded jobs are retained to prevent re-scraping/re-analysis until their `expiration_date` (default: Scrape Date + 30 days). Expired rejected jobs are automatically purged to keep the database lean.
 *   **Error Handling Approach:** The deterministic scraper must include robust exception handling so that UI changes on the target job boards do not crash the downstream pipeline.
 *   **Delivery Mechanism Options:** Processed JSON data should be appended to a local database (e.g., SQLite or a CSV) and formatted into a daily automated email or lightweight HTML dashboard for morning review. *(Delivery format to be finalized in session)*.
 
