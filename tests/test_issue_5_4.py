@@ -49,7 +49,7 @@ async def test_validity_check_integrated(test_db, migrations_dir):
     with db_manager.get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM jobs")
-        jobs = [list(row) for row in cursor.fetchall()]
+        jobs = cursor.fetchall()
     
     await app._run_validity_check_logic(jobs)
 

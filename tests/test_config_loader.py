@@ -23,4 +23,5 @@ def test_load_config_with_ai_models(tmp_path):
 
 def test_load_config_missing_file():
     config = load_config("non_existent.yaml")
-    assert config is None
+    assert isinstance(config, dict)
+    assert config["ai_models"]["sorter"] == "gemini-3-flash-preview"

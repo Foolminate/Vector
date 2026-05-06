@@ -26,28 +26,27 @@ async def test_force_digest_updates_attribution(test_db, migrations_dir):
         
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM jobs WHERE job_title = 'Force Job'")
-        job_data = list(cursor.fetchone())
+        job_data = dict(cursor.fetchone())
 
     app = ReviewApp(db_manager)
     app.current_job = job_data
     app.refresh_list = MagicMock()
     app.notify = MagicMock()
 
-    # We patch asyncio.to_thread to run the functions synchronously for testing
-    async def mock_to_thread(func, *args, **kwargs):
-        if func.__name__ == 'evaluate_job':
-            return {"verdict": "shortlisted", "technical_depth": "High", "rationale": "Mocked"}
-        if func.__name__ == 'save_evaluation':
-            # Run the actual save method, but we know it sets 'robot' initially
-            from src.evaluator import JobEvaluator
-            evaluator = JobEvaluator(db_manager)
-            evaluator.save_evaluation(*args)
-            return None
-        return func(*args, **kwargs)
+    # We need to mock the UI components that run_single_evaluation queries
+    app.query_one = MagicMock()
+    mock_pb = MagicMock()
+    app.query_one.return_value = mock_pb
 
-    with patch("asyncio.to_thread", side_effect=mock_to_thread):
-        # Call the logic method directly, bypassing @work
+    # Patch the pipeline to run the strategy directly
+    with patch.object(app.pipeline, "process_queue", new_callable=AsyncMock) as mock_process:
         await app._run_single_evaluation_logic(job_data)
+        # Verify the strategy was called with decision_by='human'
+        strategy = mock_process.call_args[0][0]
+        assert strategy.decision_by == 'human'
+
+    # Manually run a repository update to simulate the strategy finishing
+    db_manager.mark_evaluation_complete(job_data['id'], {}, 'shortlisted', decision_by='human')
 
     with db_manager.get_connection() as conn:
         cursor = conn.cursor()

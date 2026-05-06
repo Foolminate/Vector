@@ -3,17 +3,22 @@ import random
 import re
 import sqlite3
 import urllib.parse
+from typing import Optional
 from playwright.async_api import async_playwright
 from playwright_stealth import Stealth
 
 # Local imports
-from .config_loader import load_config
-from .database import DatabaseManager
+from .config_loader import AppConfig
+from .database import JobRepository, DatabaseManager
+from .parser import SeekParser
+from .pipeline import AgentPipeline
 
 class SeekCollector:
-    def __init__(self, db_manager: DatabaseManager, config: dict):
+    def __init__(self, db_manager: JobRepository, config: AppConfig, pipeline: Optional[AgentPipeline] = None):
         self.db = db_manager
         self.config = config
+        self.pipeline = pipeline
+        self.parser = SeekParser()
         self.base_url = "https://nz.seek.com"
         self.stealth = Stealth()
 
@@ -31,25 +36,25 @@ class SeekCollector:
             await self.stealth.apply_stealth_async(page)
 
             try:
-                searches = self.config.get('searches', [])
-                locations = self.config.get('locations', [])
+                searches = self.config.searches
+                locations = self.config.locations
                 
                 jobs_count = 0
                 for search in searches:
                     if limit and jobs_count >= limit:
                         break
 
-                    keywords = search['keywords']
-                    priority = search.get('priority', 1)
+                    keywords = search.keywords
+                    priority = search.priority
                     
-                    relevant_locations = [loc for loc in locations if loc.get('priority') == priority]
+                    relevant_locations = [loc for loc in locations if loc.priority == priority]
                     
                     for loc in relevant_locations:
                         if limit and jobs_count >= limit:
                             break
 
-                        loc_slug = loc['slug']
-                        print(f"Searching for '{keywords}' in '{loc['name']}' ({loc_slug})...")
+                        loc_slug = loc.slug
+                        print(f"Searching for '{keywords}' in '{loc.name}' ({loc_slug})...")
                         
                         # Human-readable URL format: /<role>-jobs/in-<location>
                         keyword_slug = re.sub(r'[^a-z0-9]+', '-', keywords.lower()).strip('-')
@@ -86,115 +91,37 @@ class SeekCollector:
 
         # Extract Redux data for advanced filtering and discovery
         redux = await page.evaluate("window.SEEK_REDUX_DATA")
+        html = await page.content()
         
-        if not redux:
-            # Fallback: Extract from script tag
-            script_content = await page.evaluate("""() => {
-                const script = document.querySelector('script[data-automation="server-state"]');
-                return script ? script.textContent : null;
-            }""")
-            
-            if script_content:
-                # Use regex to find SEEK_REDUX_DATA = { ... };
-                match = re.search(r'window\.SEEK_REDUX_DATA\s*=\s*(\{.*?\});', script_content, re.DOTALL)
-                if match:
-                    try:
-                        import json
-                        redux = json.loads(match.group(1))
-                    except Exception:
-                        pass
-
-        if not redux:
-            print(f"FAILED: No SEEK_REDUX_DATA found on {url}")
-            return 0
-            
-        results = redux.get('results', {})
+        # Use Parser to extract all jobs on the page
+        all_jobs = self.parser.parse_search_results(redux_data=redux or {}, html=html)
         
-        # GUARD 2: Handle Seek search errors
-        if results.get('isError'):
-            print(f"Seek reported a search error for {url}")
-            return 0
-
-        # GUARD 3: Fast-fail if zero results (using Redux state)
-        jobs_count_total = redux.get('results', {}).get('totalCount', 0)
-        if jobs_count_total == 0:
-            # Fallback to SK_DL if Redux results is sparse
-            jobs_count_total = await page.evaluate("window.SK_DL ? window.SK_DL.jobsCount : 0")
-
-        if jobs_count_total == 0:
+        if not all_jobs:
             print(f"Zero results for {url}")
             return 0
 
-        # PRE-FILTER: Check if all IDs on this page are already in DB
-        job_ids = results.get('jobIds', [])
-        if job_ids:
-            with self.db.get_connection() as conn:
-                cursor = conn.cursor()
-                placeholders = ','.join(['?'] * len(job_ids))
-                cursor.execute(f"SELECT seek_job_id FROM jobs WHERE seek_job_id IN ({placeholders})", job_ids)
-                existing_ids = {row['seek_job_id'] for row in cursor.fetchall()}
-            
-            if len(existing_ids) >= len(job_ids):
-                print(f"All {len(job_ids)} jobs on this page are already in the database. Skipping DOM scrape.")
-                return 0
-
         # LOG SUGGESTIONS: Capture related searches for AI discovery
-        related = results.get('relatedSearches', [])
-        source_keyword = redux.get('results', {}).get('locationWhere', 'Unknown') # or extract from URL
-        for item in related:
-            self.db.log_suggestion(item.get('keywords'), source_keyword, item.get('totalJobs'))
+        if redux and 'results' in redux:
+            related = redux.get('results', {}).get('relatedSearches', [])
+            source_keyword = redux.get('results', {}).get('locationWhere', 'Unknown')
+            for item in related:
+                self.db.log_suggestion(item.get('keywords'), source_keyword, item.get('totalJobs'))
 
-        # Wait for job cards to load (broad selector)
-        try:
-            await page.wait_for_selector('[data-automation$="Job"]', timeout=5000)
-        except Exception:
-            print("No job cards found in DOM after state settlement.")
-            return 0
-        
-        job_cards = await page.query_selector_all('[data-automation$="Job"]')
-        print(f"Found {len(job_cards)} job cards in DOM.")
-        
+        # Filter new jobs
         jobs_to_scrape = []
-        for card in job_cards:
+        for job in all_jobs:
             if limit and len(jobs_to_scrape) >= limit:
                 break
 
-            title_elem = await card.query_selector('[data-automation="jobTitle"]')
-            company_elem = await card.query_selector('[data-automation="jobCompany"]')
-            location_elem = await card.query_selector('[data-automation="jobLocation"]')
-            
-            if not title_elem:
-                continue
-                
-            title = await title_elem.inner_text()
-            href = await title_elem.get_attribute('href')
-            job_url = f"{self.base_url}{href}" if href.startswith('/') else href
-            
-            # Extract Job ID
-            seek_job_id = self._extract_job_id(job_url)
-            
-            # Clean URL
-            job_url = self._clean_url(job_url)
-            
-            company = await company_elem.inner_text() if company_elem else "Unknown"
-            location = await location_elem.inner_text() if location_elem else "Unknown"
-            
             # Post-scrape location filter (Defense-in-depth against AU leakage)
-            if not self._is_valid_nz_location(location):
-                print(f"Skipping out-of-region job: {title} at {location}")
+            if not self._is_valid_nz_location(job['location']):
                 continue
 
             # Check if exists in DB by Seek ID
-            if self.is_already_scraped(seek_job_id):
+            if self.is_already_scraped(job['seek_job_id']):
                 continue
                 
-            jobs_to_scrape.append({
-                "title": title,
-                "company": company,
-                "location": location,
-                "url": job_url,
-                "seek_job_id": seek_job_id
-            })
+            jobs_to_scrape.append(job)
 
         if not jobs_to_scrape:
             return 0
@@ -208,7 +135,14 @@ class SeekCollector:
                 print(f"Fetching details for: {job['title']}...")
                 raw_text = await self.scrape_job_details(page.context, job['url'])
                 if raw_text:
-                    self.save_job(job['title'], job['company'], job['location'], job['url'], raw_text, job['seek_job_id'])
+                    # Update job dict with details
+                    job['raw_text'] = raw_text
+                    self.db.upsert_job(job)
+                    self.db.log_action("scrape", f"Saved job: {job['title']} at {job['company']} (ID: {job['seek_job_id']})")
+                    
+                    if self.pipeline:
+                        self.pipeline.push(job['seek_job_id'])
+                        
                     return True
                 return False
 
@@ -216,11 +150,8 @@ class SeekCollector:
         return sum(1 for r in results if r)
 
     def _extract_job_id(self, url):
-        """Extract the unique integer ID from Seek URL."""
-        match = re.search(r'/job/(\d+)', url)
-        if match:
-            return match.group(1)
-        return None
+        """DEPRECATED: Moved to SeekParser."""
+        return self.parser._extract_job_id(url)
 
     def _clean_url(self, url):
         """Strip tracking parameters from URL."""
@@ -230,6 +161,8 @@ class SeekCollector:
 
     def _is_valid_nz_location(self, location_text):
         """Defense-in-depth: Ensure the location is not in Australia."""
+        if not location_text:
+            return True
         au_indicators = [
             "VIC", "NSW", "QLD", "WA", "SA", "TAS", "NT", "ACT",
             "Melbourne", "Sydney", "Brisbane", "Perth", "Adelaide", "Hobart", "Canberra", "Darwin",
@@ -237,7 +170,6 @@ class SeekCollector:
         ]
         
         for indicator in au_indicators:
-            # Use word boundaries to avoid false positives (e.g., "WA" in "Waikato")
             pattern = rf"\b{re.escape(indicator)}\b"
             if re.search(pattern, location_text, re.IGNORECASE):
                 return False
@@ -259,9 +191,8 @@ class SeekCollector:
             await page.goto(url)
             # Wait for job description
             await page.wait_for_selector('[data-automation="jobAdDetails"]', timeout=10000)
-            details_elem = await page.query_selector('[data-automation="jobAdDetails"]')
-            if details_elem:
-                return await details_elem.inner_text()
+            html = await page.content()
+            return self.parser.parse_job_details(html)
         except Exception as e:
             print(f"Error scraping details for {url}: {e}")
         finally:
@@ -269,21 +200,19 @@ class SeekCollector:
         return None
 
     def save_job(self, title, company, location, url, raw_text, seek_job_id):
-        with self.db.get_connection() as conn:
-            cursor = conn.cursor()
-            try:
-                # Set default expiration to 30 days from now
-                cursor.execute('''
-                    INSERT INTO jobs (job_title, company, location, url, raw_text, status, seek_job_id, expiration_date)
-                    VALUES (?, ?, ?, ?, ?, 'new', ?, datetime('now', '+30 days'))
-                ''', (title, company, location, url, raw_text, seek_job_id))
-                conn.commit()
-                self.db.log_action("scrape", f"Saved job: {title} at {company} (ID: {seek_job_id})")
-            except sqlite3.IntegrityError:
-                pass # Double check for race conditions
+        """DEPRECATED: Use JobRepository.upsert_job instead."""
+        self.db.upsert_job({
+            "title": title,
+            "company": company,
+            "location": location,
+            "url": url,
+            "raw_text": raw_text,
+            "seek_job_id": seek_job_id
+        })
 
 if __name__ == "__main__":
-    config = load_config()
+    import asyncio
+    config = AppConfig.load()
     db_manager = DatabaseManager()
     collector = SeekCollector(db_manager, config)
     asyncio.run(collector.scrape())

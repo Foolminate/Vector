@@ -26,7 +26,9 @@ def test_job_evaluation_logic(test_db):
         mock_client = mock_client_class.return_value
         mock_response = MagicMock()
         mock_response.text = '{"verdict": "shortlisted", "technical_depth": "Deep focus on ETL", "architectural_opportunities": ["Optimize pipelines"], "red_flags": [], "remote_status": "Likely"}'
-        mock_response.usage_metadata.total_token_count = 100 # Real integer
+        mock_response.usage_metadata.prompt_token_count = 50
+        mock_response.usage_metadata.candidates_token_count = 50
+        mock_response.usage_metadata.total_token_count = 100
         mock_client.models.generate_content.return_value = mock_response
 
         evaluator = JobEvaluator(test_db)

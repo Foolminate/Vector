@@ -6,27 +6,71 @@ import asyncio
 import httpx
 from datetime import datetime
 from textual.app import App, ComposeResult
-from textual.widgets import Header, Footer, ListView, ListItem, Label, Static, ContentSwitcher, Markdown, TextArea, Button
+from textual.widgets import Header, Footer, ListView, ListItem, Label, Static, ContentSwitcher, Markdown, TextArea, Button, ProgressBar
 from textual.containers import Horizontal, Vertical, Container
 from textual.binding import Binding
+from textual.message import Message
 from textual import work
 
 # Local imports
 from .database import DatabaseManager
 from .evaluator import JobEvaluator
+from .pipeline import PipelineObserver, AgentPipeline, EvaluationStrategy
+from .llm_client import ModelAdapter
+from .config_loader import load_config
+
+class JobStatusUpdate(Message):
+    """Sent when a job's processing status changes."""
+    def __init__(self, job_id: str, processing_status: str):
+        super().__init__()
+        self.job_id = job_id
+        self.processing_status = processing_status
+
+class PipelineProgress(Message):
+    """Sent to update the global progress bar."""
+    def __init__(self, completed: int, total: int):
+        super().__init__()
+        self.completed = completed
+        self.total = total
+
+class TuiPipelineObserver(PipelineObserver):
+    """Bridge between AgentPipeline events and Textual messages."""
+    def __init__(self, app: App):
+        self.app = app
+        self.total = 0
+        self.completed = 0
+
+    def on_job_start(self, job_id: str):
+        self.app.post_message(JobStatusUpdate(job_id, "analyzing"))
+
+    def on_job_complete(self, job_id: str):
+        self.completed += 1
+        self.app.post_message(JobStatusUpdate(job_id, "idle"))
+        self.app.post_message(PipelineProgress(self.completed, self.total))
+
+    def on_job_error(self, job_id: str, error: str):
+        self.app.post_message(JobStatusUpdate(job_id, "error"))
+
+    def on_queue_empty(self):
+        self.app.post_message(PipelineProgress(0, 0)) # Reset/Hide
+        self.completed = 0
+        self.total = 0
 
 class JobItem(ListItem):
     def __init__(self, job_data, staged_status=None):
         super().__init__()
         self.job = job_data
-        # 0:id, 1:title, 2:company, 3:location, 4:url, 5:text, 6:status, 7:score, 8:rationale, 9:analysis, 10:created, 11:seek_id, 12:notes, 13:last_checked, 14:is_valid, 15:last_decision_by, 16:expiration
-        self.job_id = job_data[0]
-        self.title = job_data[1]
-        self.company = job_data[2]
-        self.score = job_data[7]
-        self.status = job_data[6]
-        self.is_valid = job_data[14] if len(job_data) > 14 else 1
-        self.last_decision_by = job_data[15] if len(job_data) > 15 else 'robot'
+        self.job_id = job_data["id"]
+        self.title = job_data["job_title"]
+        self.company = job_data["company"]
+        self.score = job_data["score"]
+        self.status = job_data["status"]
+        
+        # Row objects don't have .get(), use key check or indexing
+        keys = job_data.keys()
+        self.is_valid = job_data["is_valid"] if "is_valid" in keys else 1
+        self.last_decision_by = job_data["last_decision_by"] if "last_decision_by" in keys else 'robot'
+        self.processing_status = job_data["processing_status"] if "processing_status" in keys else "idle"
         self.staged_status = staged_status
 
     def compose(self) -> ComposeResult:
@@ -40,7 +84,12 @@ class JobItem(ListItem):
         icon = ""
         who = "🤖" if decision_by == 'robot' else "👤"
         
-        if self.is_valid == 0:
+        # Priority for processing icons
+        if self.processing_status == "analyzing":
+            icon = "🔄"
+        elif self.processing_status == "error":
+            icon = "⚠️"
+        elif self.is_valid == 0:
             icon = "⏰"
         elif status == 'shortlisted':
             icon = "✅"
@@ -103,20 +152,18 @@ class JobDetail(Static):
             notes_input.value = ""
             return
         
-        # Unpack columns (indices may vary, using list index for safety)
-        # 0:id, 1:title, 2:company, 3:location, 4:url, 5:text, 6:status, 7:score, 8:rationale, 9:analysis, 10:created, 11:seek_id, 12:notes, 13:last_checked, 14:is_valid, 15:last_decision_by, 16:expiration
-        title = job_data[1]
-        company = job_data[2]
-        location = job_data[3]
-        url = job_data[4]
-        status = job_data[6]
-        score = job_data[7]
-        rationale = job_data[8]
-        is_valid = job_data[14] if len(job_data) > 14 else 1
-        last_checked = job_data[13] if len(job_data) > 13 else "Never"
-        expires = job_data[16] if len(job_data) > 16 else "Unknown"
+        title = job_data["job_title"]
+        company = job_data["company"]
+        location = job_data["location"]
+        url = job_data["url"]
+        status = job_data["status"]
+        score = job_data["score"]
+        rationale = job_data["analysis_json"] or "No rationale available."
+        is_valid = job_data["is_valid"] if "is_valid" in job_data.keys() else 1
+        last_checked = job_data["last_checked_at"] if "last_checked_at" in job_data.keys() else "Never"
+        expires = job_data["expiration_date"] if "expiration_date" in job_data.keys() else "Unknown"
         
-        db_notes = job_data[12] if len(job_data) > 12 else ""
+        db_notes = job_data["notes"] if "notes" in job_data.keys() else ""
         notes_input.value = staged_note if staged_note is not None else (db_notes or "")
 
         content = f"""
@@ -137,6 +184,7 @@ class JobDetail(Static):
 """
         viewer.update(content)
 
+
 class ReviewApp(App):
     TITLE = "Project Vector: High-Fidelity Review"
     CSS = """
@@ -155,9 +203,12 @@ class ReviewApp(App):
     #digest-viewer { padding: 2; }
     #suggestion-view { padding: 2; }
     #empty-digest-state { align: center middle; height: 100%; }
+    #pipeline-progress { margin: 1 2; display: none; }
+    #pipeline-progress.active { display: block; }
     """
     
     BINDINGS = [
+        # ... bindings ...
         Binding("q", "quit", "Quit"),
         Binding("p", "promote", "Promote", show=True),
         Binding("r", "reject", "Reject", show=True),
@@ -173,6 +224,7 @@ class ReviewApp(App):
         Binding("escape", "show_main", "Back", show=True),
         Binding("o", "open_url", "Open", show=True),
         Binding("u", "refresh", "Refresh", show=True),
+        Binding("ctrl+c", "cancel_tasks", "Stop Tasks", show=True),
     ]
 
     def __init__(self, db_manager: DatabaseManager):
@@ -182,6 +234,13 @@ class ReviewApp(App):
         self.staged_changes = {} # job_id -> status
         self.staged_notes = {}   # job_id -> note_text
         self.full_mode = False
+        
+        config = load_config()
+        model_id = config.get('ai_models', {}).get('evaluator', 'gemini-3.1-pro-preview')
+        adapter = ModelAdapter(model_id, repo=db_manager)
+        self.pipeline = AgentPipeline(db_manager, adapter)
+        self.observer = TuiPipelineObserver(self)
+        self.pipeline.subscribe(self.observer)
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -190,8 +249,10 @@ class ReviewApp(App):
                 with Vertical(id="sidebar"):
                     yield Label("Review Mode", id="list-header")
                     yield ListView(id="job-list")
+                    yield ProgressBar(id="pipeline-progress", show_percentage=True, show_eta=True)
                 with Container(id="detail-pane"):
                     yield JobDetail(id="details")
+            # ... rest of compose ...
             with Horizontal(id="digest-view"):
                 with Vertical(id="digest-sidebar"):
                     yield Label("Past Digests", id="digest-header")
@@ -207,6 +268,32 @@ class ReviewApp(App):
                 yield ListView(id="suggestion-list")
         yield Footer()
 
+    def on_job_status_update(self, message: JobStatusUpdate):
+        """Handle real-time status updates from the pipeline."""
+        job_list = self.query_one("#job-list", ListView)
+        for child in job_list.children:
+            if isinstance(child, JobItem) and str(child.job_id) == str(message.job_id):
+                child.processing_status = message.processing_status
+                child.query_one("#job-label", Label).update(child.get_label_text())
+                break
+
+    def on_pipeline_progress(self, message: PipelineProgress):
+        """Update the progress bar."""
+        pb = self.query_one("#pipeline-progress", ProgressBar)
+        if message.total > 0:
+            pb.set_class(True, "active")
+            pb.update(total=message.total, progress=message.completed)
+        else:
+            pb.set_class(False, "active")
+
+    def action_cancel_tasks(self):
+        """Interrupt all background workers."""
+        for worker in self.workers:
+            worker.cancel()
+        self.notify("All background tasks cancelled.")
+        self.query_one("#pipeline-progress", ProgressBar).set_class(False, "active")
+        self.refresh_list()
+
     def on_mount(self):
         self.refresh_list()
         if not self.full_mode and not self.query_one("#job-list", ListView).children:
@@ -217,16 +304,15 @@ class ReviewApp(App):
         job_list.clear()
         
         with self.db.get_connection() as conn:
-            cursor = conn.cursor()
             query = "SELECT * FROM jobs "
             if not self.full_mode:
                 query += "WHERE status IN ('edge-case', 'new') "
             query += "ORDER BY score DESC"
-            cursor.execute(query)
-            jobs = [list(row) for row in cursor.fetchall()]
+            cursor = conn.execute(query)
+            jobs = cursor.fetchall()
 
         for job in jobs:
-            staged = self.staged_changes.get(job[0])
+            staged = self.staged_changes.get(job["id"])
             job_list.append(JobItem(job, staged_status=staged))
         
         if jobs:
@@ -284,12 +370,11 @@ class ReviewApp(App):
         s_list.clear()
         
         with self.db.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT keywords, source_keyword, total_jobs, discovered_at FROM search_suggestions ORDER BY discovered_at DESC")
+            cursor = conn.execute("SELECT keywords, source_keyword, total_jobs, discovered_at FROM search_suggestions ORDER BY discovered_at DESC")
             suggestions = cursor.fetchall()
             
         for s in suggestions:
-            s_list.append(ListItem(Label(f"[{s[2]} jobs] '{s[0]}' (from '{s[1]}') - {s[3]}")))
+            s_list.append(ListItem(Label(f"[{s['total_jobs']} jobs] '{s['keywords']}' (from '{s['source_keyword']}') - {s['discovered_at']}")))
 
     def action_show_main(self):
         self.query_one("#main-switcher", ContentSwitcher).current = "review-view"
@@ -301,12 +386,30 @@ class ReviewApp(App):
 
     @work(exclusive=True)
     async def run_background_evaluation(self):
-        self.notify("Agent 2: Starting evaluation of high-pass jobs...")
-        evaluator = JobEvaluator(self.db)
-        # We wrap the synchronous method in a thread
-        await asyncio.to_thread(evaluator.evaluate_all_new)
-        self.notify("Agent 2: Evaluation complete.")
-        self.action_view_digest() # Refresh view
+        """Pushes all high-pass jobs to the pipeline and runs Agent 2."""
+        with self.db.get_connection() as conn:
+            query = "SELECT id FROM jobs WHERE status = 'high-pass' AND analysis_json IS NULL"
+            jobs = conn.execute(query).fetchall()
+        
+        if not jobs:
+            self.notify("No new high-pass jobs to evaluate.")
+            return
+
+        self.observer.total = len(jobs)
+        self.query_one("#pipeline-progress", ProgressBar).set_class(True, "active")
+        
+        for job in jobs:
+            self.db.update_processing_status(job["id"], "idle")
+            self.pipeline.push(job["id"])
+            
+        self.notify(f"Queued {len(jobs)} jobs for deep evaluation.")
+        
+        # Run worker in background and wait for queue to drain
+        worker = asyncio.create_task(self.pipeline.process_queue(EvaluationStrategy()))
+        try:
+            await self.pipeline.queue.join()
+        finally:
+            worker.cancel()
 
     def action_force_digest(self):
         if self.current_job:
@@ -314,21 +417,22 @@ class ReviewApp(App):
 
     @work(exclusive=True)
     async def run_single_evaluation(self, job):
+        """Forces evaluation for a single job via the pipeline."""
         await self._run_single_evaluation_logic(job)
 
     async def _run_single_evaluation_logic(self, job):
-        self.notify(f"Forcing Agent 2 on: {job[1]}")
-        evaluator = JobEvaluator(self.db)
-        # job[0]:id, 1:title, 2:company, 3:location, 5:text
-        result = await asyncio.to_thread(evaluator.evaluate_job, job[0], job[1], job[2], job[3], job[5])
-        if result:
-            await asyncio.to_thread(evaluator.save_evaluation, job[0], result)
-            # Update last_decision_by to human since it was forced
-            with self.db.get_connection() as conn:
-                conn.execute("UPDATE jobs SET last_decision_by = 'human' WHERE id = ?", (job[0],))
-                conn.commit()
-            self.notify("Agent 2 evaluation complete.")
-            self.refresh_list()
+        self.observer.total = 1
+        self.query_one("#pipeline-progress", ProgressBar).set_class(True, "active")
+        self.db.update_processing_status(job["id"], "idle")
+        self.pipeline.push(job["id"])
+        
+        worker = asyncio.create_task(self.pipeline.process_queue(EvaluationStrategy(decision_by='human')))
+        try:
+            await self.pipeline.queue.join()
+        finally:
+            worker.cancel()
+            
+        self.refresh_list()
 
     def action_verify_selected(self):
         if self.current_job:
@@ -336,10 +440,9 @@ class ReviewApp(App):
 
     def action_verify_all(self):
         with self.db.get_connection() as conn:
-            cursor = conn.cursor()
             # "Law": Check all active jobs, or rejected jobs past expiration
-            cursor.execute("SELECT * FROM jobs WHERE status NOT IN ('rejected', 'discarded') OR expiration_date < CURRENT_TIMESTAMP")
-            jobs = [list(row) for row in cursor.fetchall()]
+            cursor = conn.execute("SELECT * FROM jobs WHERE status NOT IN ('rejected', 'discarded') OR expiration_date < CURRENT_TIMESTAMP")
+            jobs = cursor.fetchall()
         if jobs:
             self.run_validity_check(jobs)
 
@@ -352,20 +455,20 @@ class ReviewApp(App):
         self.notify(f"Starting validity check for {total} jobs...")
         
         async with httpx.AsyncClient(timeout=10.0) as client:
-            with self.db.get_connection() as conn:
-                for i, job in enumerate(jobs):
-                    self.notify(f"Checking {i+1}/{total}: {job[1]}")
-                    try:
-                        is_valid = await self._check_url_validity(client, job[4])
-                    except Exception:
-                        is_valid = 1 # Assume valid on network error to be safe
-                    
-                    # Law: Auto-mark for deletion if rejected and expired
-                    if is_valid == 0 and job[6] in ['rejected', 'discarded']:
-                        conn.execute("UPDATE jobs SET status = 'deleted', is_valid = 0, last_checked_at = CURRENT_TIMESTAMP WHERE id = ?", (job[0],))
+            for i, job in enumerate(jobs):
+                self.notify(f"Checking {i+1}/{total}: {job['job_title']}")
+                try:
+                    is_valid = await self._check_url_validity(client, job['url'])
+                except Exception:
+                    is_valid = 1 # Assume valid on network error to be safe
+                
+                # Law: Auto-mark for deletion if rejected and expired
+                with self.db.get_connection() as conn:
+                    if is_valid == 0 and job['status'] in ['rejected', 'discarded']:
+                        conn.execute("UPDATE jobs SET status = 'deleted', is_valid = 0, last_checked_at = CURRENT_TIMESTAMP WHERE id = ?", (job['id'],))
                     else:
-                        conn.execute("UPDATE jobs SET is_valid = ?, last_checked_at = CURRENT_TIMESTAMP WHERE id = ?", (is_valid, job[0]))
-                conn.commit()
+                        conn.execute("UPDATE jobs SET is_valid = ?, last_checked_at = CURRENT_TIMESTAMP WHERE id = ?", (is_valid, job['id']))
+                    conn.commit()
             
         self.notify(f"Validity check complete for {total} jobs.")
         self.refresh_list()
@@ -378,7 +481,7 @@ class ReviewApp(App):
 
     def update_details(self, job):
         try:
-            staged_note = self.staged_notes.get(job[0]) if job else None
+            staged_note = self.staged_notes.get(job['id']) if job else None
             self.query_one("#details", JobDetail).update_detail(job, staged_note=staged_note)
         except Exception:
             pass
@@ -398,14 +501,14 @@ class ReviewApp(App):
         if self.current_job:
             try:
                 notes_input = self.query_one("#notes-input", TextArea)
-                self.staged_notes[self.current_job[0]] = notes_input.value
+                self.staged_notes[self.current_job['id']] = notes_input.value
             except Exception:
                 pass
 
     def _stage_decision(self, status):
         if self.current_job:
             self._capture_current_note()
-            job_id = self.current_job[0]
+            job_id = self.current_job['id']
             self.staged_changes[job_id] = status
             
             job_list = self.query_one("#job-list", ListView)
@@ -421,7 +524,7 @@ class ReviewApp(App):
     
     def action_clear_stage(self):
         if self.current_job:
-            job_id = self.current_job[0]
+            job_id = self.current_job['id']
             if job_id in self.staged_changes:
                 del self.staged_changes[job_id]
                 job_list = self.query_one("#job-list", ListView)
@@ -437,26 +540,27 @@ class ReviewApp(App):
             self.notify("No changes to save.")
             return
 
-        with self.db.get_connection() as conn:
-            cursor = conn.cursor()
-            for job_id, status in self.staged_changes.items():
-                if status == 'deleted':
-                    cursor.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
-                else:
-                    cursor.execute("UPDATE jobs SET status = ?, last_decision_by = 'human' WHERE id = ?", (status, job_id))
-            for job_id, notes in self.staged_notes.items():
-                cursor.execute("UPDATE jobs SET notes = ? WHERE id = ?", (notes, job_id))
-            conn.commit()
+        for job_id, status in self.staged_changes.items():
+            if status == 'deleted':
+                self.db.delete_job(job_id)
+            else:
+                self.db.update_job_status(job_id, status, decision_by='human')
+        
+        for job_id, notes in self.staged_notes.items():
+            if notes.strip():
+                self.db.add_note(job_id, notes)
         
         self.staged_changes = {}
         self.staged_notes = {}
         self.notify("Changes saved to database.")
         self.refresh_list()
 
+
     def action_open_url(self):
         if self.current_job:
-            webbrowser.open(self.current_job[4])
+            webbrowser.open(self.current_job["url"])
             self.notify("Opening browser...")
+
 
     def action_refresh(self): self.refresh_list()
 

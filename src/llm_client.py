@@ -1,26 +1,47 @@
 import json
 import os
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Type, TypeVar
+from pydantic import BaseModel
 from google import genai
 from google.genai import types
 from tenacity import retry, wait_exponential, stop_after_attempt
 
-from .database import DatabaseManager
+from .database import JobRepository
 
-class LLMClient:
-    def __init__(self, db_manager: DatabaseManager, model_id: str):
-        self.db = db_manager
+T = TypeVar('T', bound=BaseModel)
+
+def log_retry(retry_state):
+    print(f"Retrying LLM call (attempt {retry_state.attempt_number})... Reason: {retry_state.outcome.exception()}")
+
+class ModelAdapter:
+    """
+    Provider-agnostic adapter for LLM interactions.
+    Currently supports Gemini, but designed for expansion.
+    """
+    def __init__(self, model_id: str, repo: Optional[JobRepository] = None):
         self.model_id = model_id
+        self.repo = repo
         
         api_key = os.environ.get("GEMINI_VECTOR_API_KEY")
         if not api_key:
             raise ValueError("GEMINI_VECTOR_API_KEY environment variable not set.")
         
-        self.client = genai.Client(api_key=api_key)
+        self.client = genai.Client(
+            api_key=api_key,
+            http_options={'timeout': 60.0}
+        )
 
-    @retry(wait=wait_exponential(multiplier=1, min=2, max=10), stop=stop_after_attempt(3))
-    def generate_json(self, prompt: str, job_id: Optional[int] = None, action: Optional[str] = None) -> Dict[str, Any]:
-        """Generates JSON content with retries and logs token usage."""
+    @retry(
+        wait=wait_exponential(multiplier=1, min=2, max=30), 
+        stop=stop_after_attempt(5), 
+        after=log_retry,
+        reraise=True
+    )
+    def generate_json(self, prompt: str, response_model: Type[T], task: Optional[str] = None) -> T:
+        """
+        Generates JSON content, validates against response_model, 
+        and logs costs.
+        """
         try:
             response = self.client.models.generate_content(
                 model=self.model_id,
@@ -30,29 +51,48 @@ class LLMClient:
                 )
             )
             
-            # Log cost
-            if response.usage_metadata:
-                tokens = response.usage_metadata.total_token_count
-                self._log_cost(tokens, job_id, action)
+            # Log cost if repository is provided
+            if self.repo and response.usage_metadata:
+                usage = response.usage_metadata
+                # Estimate cost (very rough, should be tuned per model)
+                cost = (usage.prompt_token_count * 0.000125 + usage.candidates_token_count * 0.000375) / 1000
+                self.repo.log_cost(
+                    model=self.model_id,
+                    tokens_in=usage.prompt_token_count,
+                    tokens_out=usage.candidates_token_count,
+                    cost=cost,
+                    task=task
+                )
             
+            # Parse and validate
             data = json.loads(response.text)
             
-            # Handle cases where the model wraps the response in a list
+            # Handle list-wrapping if it happens
             if isinstance(data, list) and len(data) > 0:
                 data = data[0]
-            
-            if not isinstance(data, dict):
-                print(f"Warning: LLM returned non-dict JSON: {type(data)}")
                 
-            return data
+            return response_model.model_validate(data)
+            
         except Exception as e:
-            print(f"LLM Error (Model: {self.model_id}): {e}")
-            raise # Let tenacity handle retries
+            raise
 
-    def _log_cost(self, tokens: int, job_id: Optional[int], action: Optional[str]):
-        with self.db.get_connection() as conn:
-            conn.execute('''
-                INSERT INTO cost_log (model, token_count, job_id, action)
-                VALUES (?, ?, ?, ?)
-            ''', (self.model_id, tokens, job_id, action))
-            conn.commit()
+class LLMClient(ModelAdapter):
+    """Legacy Wrapper for compatibility."""
+    def __init__(self, db_manager: Any, model_id: str):
+        super().__init__(model_id=model_id, repo=db_manager)
+
+    def generate_json(self, prompt, response_model=None, task=None, job_id=None, action=None):
+        """Maps legacy signature to ModelAdapter.generate_json."""
+        if response_model is None:
+            # Create a dynamic model if none provided
+            class DynamicResponse(BaseModel):
+                class Config:
+                    extra = 'allow'
+            response_model = DynamicResponse
+            
+        task = task or action or "legacy"
+        # We don't use job_id directly here, ModelAdapter logs it via repo if needed
+        # but ModelAdapter.log_cost doesn't take job_id currently.
+        
+        result = super().generate_json(prompt, response_model=response_model, task=task)
+        return result.model_dump()

@@ -1,4 +1,5 @@
-from src.main import DatabaseManager, load_config
+from src.database import DatabaseManager
+from src.config_loader import load_config
 from src.sorter import TriageSorter
 from src.collector import SeekCollector
 import os
@@ -82,7 +83,9 @@ def test_triage_logic(test_db):
         mock_client = mock_client_class.return_value
         mock_response = MagicMock()
         mock_response.text = '{"score": 90, "rationale": "High automation focus"}'
-        mock_response.usage_metadata.total_token_count = 50 # Real integer
+        mock_response.usage_metadata.prompt_token_count = 25
+        mock_response.usage_metadata.candidates_token_count = 25
+        mock_response.usage_metadata.total_token_count = 50
         mock_client.models.generate_content.return_value = mock_response
 
         # Run triage

@@ -16,22 +16,26 @@ def test_llm_client_logs_tokens(mock_db):
         # Mock response
         mock_response = MagicMock()
         mock_response.text = '{"score": 90, "rationale": "Great"}'
+        # MUST set granular tokens to avoid MagicMock in DB
+        mock_response.usage_metadata.prompt_token_count = 60
+        mock_response.usage_metadata.candidates_token_count = 63
         mock_response.usage_metadata.total_token_count = 123
         mock_client.models.generate_content.return_value = mock_response
         
         with patch.dict('os.environ', {'GEMINI_VECTOR_API_KEY': 'fake-key'}):
             client = LLMClient(mock_db, "test-model")
+            # Legacy signature
             result = client.generate_json("test prompt", job_id=1, action="test_action")
             
             assert result["score"] == 90
             
-            # Verify cost logged
+            # Verify cost logged (v9 schema: tokens_in, tokens_out, cost, task)
             with mock_db.get_connection() as conn:
                 row = conn.execute("SELECT * FROM cost_log").fetchone()
                 assert row['model'] == "test-model"
-                assert row['token_count'] == 123
-                assert row['job_id'] == 1
-                assert row['action'] == "test_action"
+                assert row['tokens_in'] == 60
+                assert row['tokens_out'] == 63
+                assert row['task'] == "test_action"
 
 def test_llm_client_retries_on_error(mock_db):
     with patch('google.genai.Client') as mock_genai:
@@ -41,6 +45,8 @@ def test_llm_client_retries_on_error(mock_db):
         # Fail twice, succeed third time
         mock_response = MagicMock()
         mock_response.text = '{"ok": true}'
+        mock_response.usage_metadata.prompt_token_count = 5
+        mock_response.usage_metadata.candidates_token_count = 5
         mock_response.usage_metadata.total_token_count = 10
         
         mock_client.models.generate_content.side_effect = [
@@ -64,6 +70,8 @@ def test_llm_client_handles_list_response(mock_db):
         
         mock_response = MagicMock()
         mock_response.text = '[{"score": 85, "rationale": "Wrapped in list"}]'
+        mock_response.usage_metadata.prompt_token_count = 25
+        mock_response.usage_metadata.candidates_token_count = 25
         mock_response.usage_metadata.total_token_count = 50
         mock_client.models.generate_content.return_value = mock_response
         

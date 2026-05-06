@@ -64,7 +64,8 @@ Return your response in strict JSON format:
 """
         try:
             return self.llm.generate_json(prompt, job_id=job_id, action="triage")
-        except Exception:
+        except Exception as e:
+            print(f"Error triaging job {job_id}: {e}")
             return None
 
     def update_job_status(self, job_id: int, result: Any):

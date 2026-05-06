@@ -3,11 +3,24 @@ from src.review_tui import JobItem
 from textual.widgets import Label
 
 def create_mock_job(id=1, title="DevOps Engineer", company="Tech Corp", score=90, status="new", is_valid=1, last_decision_by="robot"):
-    # Mocking the 18-column structure from the database
-    # 0:id, 1:title, 2:company, 3:location, 4:url, 5:text, 6:status, 7:score, 8:rationale, 9:analysis, 10:created, 11:seek_id, 12:notes, 13:last_checked, 14:is_valid, 15:last_decision_by, 16:expiration
-    return [
-        id, title, company, "Hamilton", "http://test.com", "Text", status, score, "Rationale", None, "2026-05-05", "seek-123", "", None, is_valid, last_decision_by, "2026-06-05"
-    ]
+    return {
+        "id": id,
+        "job_title": title,
+        "company": company,
+        "location": "Hamilton",
+        "url": "http://test.com",
+        "raw_text": "Text",
+        "status": status,
+        "score": score,
+        "analysis_json": "Rationale",
+        "created_at": "2026-05-05",
+        "seek_job_id": "seek-123",
+        "notes": "",
+        "last_checked_at": None,
+        "is_valid": is_valid,
+        "last_decision_by": last_decision_by,
+        "expiration_date": "2026-06-05"
+    }
 
 def test_job_item_emoji_mapping():
     """Verify that JobItem displays the correct emojis for various states."""

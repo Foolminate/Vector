@@ -3,8 +3,8 @@ import asyncio
 from datetime import datetime
 
 # Local imports
-from .database import DatabaseManager
-from .config_loader import load_config
+from .database import DatabaseManager, JobRepository
+from .config_loader import AppConfig
 from .collector import SeekCollector
 from .sorter import TriageSorter
 
@@ -35,7 +35,7 @@ def main():
     if args.command == "setup":
         print("Initializing Project Vector...")
         db.log_action("setup", "System initialization")
-        config = load_config()
+        config = AppConfig.load()
         if config:
             print("Configuration loaded successfully.")
         else:
@@ -44,7 +44,7 @@ def main():
 
     elif args.command == "scrape":
         print(f"Starting Seek scraper (limit={args.limit})...")
-        config = load_config()
+        config = AppConfig.load()
         collector = SeekCollector(db, config)
         asyncio.run(collector.scrape(limit=args.limit))
         db.log_action("scrape", f"Completed run (limit={args.limit})")
