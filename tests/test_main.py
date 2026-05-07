@@ -65,8 +65,7 @@ def test_triage_thresholds(test_db):
     with test_db.get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT status FROM jobs WHERE id = ?", (job_id,))
-        assert cursor.fetchone()[0] == "rejected"
-
+        assert cursor.fetchone()[0] == "discarded"
 def test_triage_logic(test_db):
     # Insert a mock job
     with test_db.get_connection() as conn:
@@ -95,11 +94,11 @@ def test_triage_logic(test_db):
         # Check database update
         with test_db.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT status, score, rationale FROM jobs WHERE id = ?", (job_id,))
+            cursor.execute("SELECT status, score, analysis_json FROM jobs WHERE id = ?", (job_id,))
             row = cursor.fetchone()
             assert row['status'] == "high-pass"
             assert row['score'] == 90
-            assert row['rationale'] == "High automation focus"
+            assert "High automation focus" in row['analysis_json']
 
 def test_database_initialization(test_db):
     conn = sqlite3.connect(test_db.db_path)

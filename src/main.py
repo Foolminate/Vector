@@ -1,6 +1,14 @@
 import argparse
 import asyncio
+import ssl
 from datetime import datetime
+
+# Robust SSL handling for Windows
+try:
+    import truststore
+    truststore.inject_into_ssl()
+except ImportError:
+    pass
 
 # Local imports
 from .database import DatabaseManager, JobRepository

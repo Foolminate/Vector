@@ -28,7 +28,7 @@ async def test_validity_check_integrated(test_db, migrations_dir):
         )
         conn.execute(
             "INSERT INTO jobs (job_title, company, location, url, status, expiration_date) VALUES (?, ?, ?, ?, ?, datetime('now', '-1 day'))",
-            ("Invalid Rejected", "Co", "Loc", "http://invalid.com/job/3", "rejected")
+            ("Invalid Rejected", "Co", "Loc", "http://invalid.com/job/3", "discarded")
         )
         conn.commit()
 
@@ -49,7 +49,7 @@ async def test_validity_check_integrated(test_db, migrations_dir):
     with db_manager.get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM jobs")
-        jobs = cursor.fetchall()
+        jobs = [dict(row) for row in cursor.fetchall()]
     
     await app._run_validity_check_logic(jobs)
 
@@ -67,8 +67,8 @@ async def test_validity_check_integrated(test_db, migrations_dir):
         assert row['is_valid'] == 0
         assert row['status'] == 'edge-case'
         
-        # Invalid Rejected
+        # Invalid Rejected (now archived)
         cursor.execute("SELECT is_valid, status FROM jobs WHERE job_title = 'Invalid Rejected'")
         row = cursor.fetchone()
         assert row['is_valid'] == 0
-        assert row['status'] == 'deleted'
+        assert row['status'] == 'archived'

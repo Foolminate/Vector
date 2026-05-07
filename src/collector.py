@@ -12,6 +12,7 @@ from .config_loader import AppConfig
 from .database import JobRepository, DatabaseManager
 from .parser import SeekParser
 from .pipeline import AgentPipeline
+from .models import RawJobData
 
 class SeekCollector:
     def __init__(self, db_manager: JobRepository, config: AppConfig, pipeline: Optional[AgentPipeline] = None):
@@ -73,11 +74,22 @@ class SeekCollector:
                 await browser.close()
 
     async def scrape_search_results(self, page, url, limit=None):
-        await page.goto(url, wait_until="networkidle")
+        response = await page.goto(url, wait_until="networkidle")
         
+        # BOT DETECTION: Check for 403 Forbidden
+        if response and response.status == 403:
+            print(f"BOT BLOCKED: 403 Forbidden at {url}")
+            self.db.log_action("bot_blocked", f"403 Forbidden at {url}")
+            return 0
+
         # GUARD 1: Check if we are actually on Seek (not blocked)
         if not await page.query_selector('[data-automation="seek"]'):
-            print(f"FAILED: Page integrity check failed for {url}. Possible bot detection.")
+            html = await page.content()
+            if "CAPTCHA" in html.upper():
+                print(f"BOT BLOCKED: CAPTCHA detected at {url}")
+                self.db.log_action("bot_blocked", f"CAPTCHA detected at {url}")
+            else:
+                print(f"FAILED: Page integrity check failed for {url}. Possible bot detection.")
             return 0
 
         # Wait for Seek to settle its Redux state
@@ -93,7 +105,7 @@ class SeekCollector:
         redux = await page.evaluate("window.SEEK_REDUX_DATA")
         html = await page.content()
         
-        # Use Parser to extract all jobs on the page
+        # Use Parser to extract all jobs on the page (now returns List[RawJobData])
         all_jobs = self.parser.parse_search_results(redux_data=redux or {}, html=html)
         
         if not all_jobs:
@@ -114,11 +126,11 @@ class SeekCollector:
                 break
 
             # Post-scrape location filter (Defense-in-depth against AU leakage)
-            if not self._is_valid_nz_location(job['location']):
+            if not self._is_valid_nz_location(job.location):
                 continue
 
             # Check if exists in DB by Seek ID
-            if self.is_already_scraped(job['seek_job_id']):
+            if self.is_already_scraped(job.seek_job_id):
                 continue
                 
             jobs_to_scrape.append(job)
@@ -130,18 +142,17 @@ class SeekCollector:
         
         semaphore = asyncio.Semaphore(3)
         
-        async def sem_scrape(job):
+        async def sem_scrape(job: RawJobData):
             async with semaphore:
-                print(f"Fetching details for: {job['title']}...")
-                raw_text = await self.scrape_job_details(page.context, job['url'])
+                print(f"Fetching details for: {job.title}...")
+                raw_text = await self.scrape_job_details(page.context, str(job.url))
                 if raw_text:
-                    # Update job dict with details
-                    job['raw_text'] = raw_text
+                    # Update job model with details
+                    job.raw_text = raw_text
                     self.db.upsert_job(job)
-                    self.db.log_action("scrape", f"Saved job: {job['title']} at {job['company']} (ID: {job['seek_job_id']})")
                     
                     if self.pipeline:
-                        self.pipeline.push(job['seek_job_id'])
+                        self.pipeline.push(job.seek_job_id)
                         
                     return True
                 return False
@@ -195,6 +206,7 @@ class SeekCollector:
             return self.parser.parse_job_details(html)
         except Exception as e:
             print(f"Error scraping details for {url}: {e}")
+            self.db.log_action("scrape_failed", f"Error scraping {url}: {e}")
         finally:
             await page.close()
         return None

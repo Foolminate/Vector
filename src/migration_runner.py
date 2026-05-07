@@ -35,7 +35,13 @@ class MigrationRunner:
         if not os.path.exists(self.migrations_dir):
             return []
         files = [f for f in os.listdir(self.migrations_dir) if f.endswith(".sql")]
-        return sorted(files)
+        
+        def extract_version(filename):
+            match = re.search(r'^v(\d+)', filename)
+            return int(match.group(1)) if match else 0
+            
+        import re
+        return sorted(files, key=extract_version)
 
     def _apply_migration(self, conn: sqlite3.Connection, filename: str):
         path = os.path.join(self.migrations_dir, filename)

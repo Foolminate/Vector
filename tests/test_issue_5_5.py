@@ -40,6 +40,12 @@ async def test_force_digest_updates_attribution(test_db, migrations_dir):
 
     # Patch the pipeline to run the strategy directly
     with patch.object(app.pipeline, "process_queue", new_callable=AsyncMock) as mock_process:
+        # We need to mark task as done otherwise queue.join() hangs
+        async def side_effect(*args, **kwargs):
+            app.pipeline.queue.get_nowait()
+            app.pipeline.queue.task_done()
+        mock_process.side_effect = side_effect
+        
         await app._run_single_evaluation_logic(job_data)
         # Verify the strategy was called with decision_by='human'
         strategy = mock_process.call_args[0][0]

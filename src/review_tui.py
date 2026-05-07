@@ -4,6 +4,7 @@ import os
 import glob
 import asyncio
 import httpx
+import ssl
 from datetime import datetime
 from textual.app import App, ComposeResult
 from textual.widgets import Header, Footer, ListView, ListItem, Label, Static, ContentSwitcher, Markdown, TextArea, Button, ProgressBar
@@ -11,6 +12,14 @@ from textual.containers import Horizontal, Vertical, Container
 from textual.binding import Binding
 from textual.message import Message
 from textual import work
+
+# Robust SSL handling for Windows
+try:
+    import truststore
+    truststore.inject_into_ssl()
+    _ssl_context = truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+except ImportError:
+    _ssl_context = None
 
 # Local imports
 from .database import DatabaseManager
@@ -94,13 +103,11 @@ class JobItem(ListItem):
         elif status == 'shortlisted':
             icon = "✅"
         elif status == 'discarded':
-            icon = "❌"
+            icon = "❌" if not self.staged_status or self.staged_status == 'discarded' else "⬇️"
         elif status == 'high-pass':
             icon = "✅" if not self.staged_status else "⬆️"
         elif status == 'edge-case':
             icon = "❓"
-        elif status == 'rejected':
-            icon = "❌" if not self.staged_status else "⬇️"
         elif status == 'deleted':
             icon = "🗑️"
         elif status == 'new':
@@ -117,13 +124,13 @@ class JobItem(ListItem):
             self.add_class("expired")
         elif self.staged_status == 'high-pass':
             self.add_class("staged-promote")
-        elif self.staged_status == 'rejected':
+        elif self.staged_status == 'discarded':
             self.add_class("staged-reject")
         elif self.staged_status == 'deleted':
             self.add_class("urgent")
         elif status == 'edge-case':
             self.add_class("urgent")
-        elif status in ['rejected', 'discarded', 'low-pass']:
+        elif status in ['discarded', 'low-pass']:
             self.add_class("dimmed")
         elif status == 'shortlisted' and decision_by == 'robot':
             self.set_class(True, "bright-shortlist")
@@ -440,8 +447,8 @@ class ReviewApp(App):
 
     def action_verify_all(self):
         with self.db.get_connection() as conn:
-            # "Law": Check all active jobs, or rejected jobs past expiration
-            cursor = conn.execute("SELECT * FROM jobs WHERE status NOT IN ('rejected', 'discarded') OR expiration_date < CURRENT_TIMESTAMP")
+            # "Law": Check all active jobs, or discarded jobs past expiration
+            cursor = conn.execute("SELECT * FROM jobs WHERE status != 'discarded' OR expiration_date < CURRENT_TIMESTAMP")
             jobs = cursor.fetchall()
         if jobs:
             self.run_validity_check(jobs)
@@ -454,7 +461,12 @@ class ReviewApp(App):
         total = len(jobs)
         self.notify(f"Starting validity check for {total} jobs...")
         
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        # Use robust SSL settings and increased timeouts for Windows stability
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(30.0, connect=20.0),
+            verify=_ssl_context if _ssl_context else True,
+            http2=False
+        ) as client:
             for i, job in enumerate(jobs):
                 self.notify(f"Checking {i+1}/{total}: {job['job_title']}")
                 try:
@@ -462,10 +474,10 @@ class ReviewApp(App):
                 except Exception:
                     is_valid = 1 # Assume valid on network error to be safe
                 
-                # Law: Auto-mark for deletion if rejected and expired
+                # Law: Auto-mark for archiving if discarded and expired
                 with self.db.get_connection() as conn:
-                    if is_valid == 0 and job['status'] in ['rejected', 'discarded']:
-                        conn.execute("UPDATE jobs SET status = 'deleted', is_valid = 0, last_checked_at = CURRENT_TIMESTAMP WHERE id = ?", (job['id'],))
+                    if is_valid == 0 and job['status'] == 'discarded':
+                        conn.execute("UPDATE jobs SET status = 'archived', is_valid = 0, last_checked_at = CURRENT_TIMESTAMP WHERE id = ?", (job['id'],))
                     else:
                         conn.execute("UPDATE jobs SET is_valid = ?, last_checked_at = CURRENT_TIMESTAMP WHERE id = ?", (is_valid, job['id']))
                     conn.commit()
@@ -519,7 +531,7 @@ class ReviewApp(App):
             job_list.index += 1
 
     def action_promote(self): self._stage_decision('high-pass')
-    def action_reject(self): self._stage_decision('rejected')
+    def action_reject(self): self._stage_decision('discarded')
     def action_mark_delete(self): self._stage_decision('deleted')
     
     def action_clear_stage(self):

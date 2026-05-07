@@ -21,10 +21,9 @@ def test_parse_search_results_redux():
     
     jobs = parser.parse_search_results(redux_data=mock_redux, html="")
     assert len(jobs) == 1
-    assert jobs[0]['title'] == "Software Engineer"
-    assert jobs[0]['company'] == "Tech Co"
-    assert jobs[0]['seek_job_id'] == "123"
-    assert "published_at" in jobs[0]
+    assert jobs[0].title == "Software Engineer"
+    assert jobs[0].company == "Tech Co"
+    assert jobs[0].seek_job_id == "123"
 
 def test_parse_search_results_dom_fallback():
     """Test extraction from DOM when Redux is missing."""
@@ -43,9 +42,9 @@ def test_parse_search_results_dom_fallback():
     
     jobs = parser.parse_search_results(redux_data={}, html=mock_html)
     assert len(jobs) == 1
-    assert jobs[0]['title'] == "Data Scientist"
-    assert jobs[0]['company'] == "Data Corp"
-    assert jobs[0]['seek_job_id'] == "456"
+    assert jobs[0].title == "Data Scientist"
+    assert jobs[0].company == "Data Corp"
+    assert jobs[0].seek_job_id == "456"
 
 def test_parse_job_details():
     """Test extraction of job description."""

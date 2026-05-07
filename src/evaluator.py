@@ -63,7 +63,7 @@ Based on your analysis, provide a verdict:
 Return your response in strict JSON format.
 """
         try:
-            return self.llm.generate_json(prompt, response_model=JobEvaluation, task="evaluation")
+            return self.llm.generate_json(prompt, response_model=JobEvaluation, task="evaluation", job_id=job_id)
         except Exception as e:
             print(f"Error evaluating job {job_id}: {e}")
             return None

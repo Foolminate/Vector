@@ -2,6 +2,7 @@ from bs4 import BeautifulSoup
 import json
 import re
 from typing import List, Optional, Dict
+from .models import RawJobData
 
 class SeekParser:
     """
@@ -9,7 +10,7 @@ class SeekParser:
     Separates 'fetching' (IO) from 'parsing' (Logic).
     """
 
-    def parse_search_results(self, redux_data: dict, html: str) -> List[dict]:
+    def parse_search_results(self, redux_data: dict, html: str) -> List[RawJobData]:
         """
         Extract job listings from Redux data with DOM fallback.
         """
@@ -21,7 +22,7 @@ class SeekParser:
         # 2. Try DOM Fallback
         return self._parse_from_dom(html)
 
-    def _parse_from_redux(self, redux: dict) -> List[dict]:
+    def _parse_from_redux(self, redux: dict) -> List[RawJobData]:
         if not redux or 'results' not in redux:
             return []
             
@@ -35,18 +36,17 @@ class SeekParser:
             if not job_id:
                 continue
                 
-            parsed_jobs.append({
-                "title": job.get('title'),
-                "company": job.get('advertiser', {}).get('description', 'Unknown'),
-                "location": job.get('location', 'Unknown'),
-                "seek_job_id": str(job_id),
-                "url": f"https://nz.seek.com/job/{job_id}",
-                "published_at": job.get('listingDate'),
-                "expiration_date": job.get('expiryDate') or job.get('listingExpiryDate')
-            })
+            parsed_jobs.append(RawJobData(
+                title=job.get('title'),
+                company=job.get('advertiser', {}).get('description', 'Unknown'),
+                location=job.get('location', 'Unknown'),
+                seek_job_id=str(job_id),
+                url=f"https://nz.seek.com/job/{job_id}",
+                expiration_date=job.get('expiryDate') or job.get('listingExpiryDate')
+            ))
         return parsed_jobs
 
-    def _parse_from_dom(self, html: str) -> List[dict]:
+    def _parse_from_dom(self, html: str) -> List[RawJobData]:
         if not html:
             return []
             
@@ -74,13 +74,13 @@ class SeekParser:
             if not seek_job_id:
                 continue
 
-            parsed_jobs.append({
-                "title": title,
-                "company": company,
-                "location": location,
-                "seek_job_id": str(seek_job_id),
-                "url": f"https://nz.seek.com/job/{seek_job_id}"
-            })
+            parsed_jobs.append(RawJobData(
+                title=title,
+                company=company,
+                location=location,
+                seek_job_id=str(seek_job_id),
+                url=f"https://nz.seek.com/job/{seek_job_id}"
+            ))
             
         return parsed_jobs
 

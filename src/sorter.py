@@ -16,6 +16,14 @@ class TriageSorter:
         self.llm = LLMClient(db_manager, model_id)
 
     def _load_doctrine(self, path: str) -> str:
+        if not os.path.exists(path):
+            print(f"Warning: Doctrine file {path} not found. Using fallback.")
+            return """
+            # Standard Triage Doctrine
+            - Focus on technical relevance (software, engineering, automation).
+            - Prioritize architectural and strategic roles.
+            - Filter out manual toil and administrative tasks.
+            """
         with open(path, 'r') as f:
             return f.read()
 
@@ -76,22 +84,12 @@ Return your response in strict JSON format:
         score = result.get('score', 0)
         rationale = result.get('rationale', "No rationale provided")
         
-        status = 'rejected'
-        if score >= 80:
-            status = 'high-pass'
-        elif score >= 40:
-            status = 'edge-case'
-            
-        with self.db.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
-                UPDATE jobs 
-                SET status = ?, score = ?, rationale = ?, last_decision_by = 'robot'
-                WHERE id = ?
-            ''', (status, score, rationale, job_id))
-            conn.commit()
+        # Use JobRepository method to standardize logic and status
+        self.db.mark_triage_complete(job_id, score, {"rationale": rationale})
         
-        self.db.log_action("triage", f"Job {job_id} scored {score} -> {status}")
+        # We don't need status local variable here anymore as mark_triage_complete handles it
+        # But for logging we can get it if we really wanted to, or just log the score.
+        self.db.log_action("triage", f"Job {job_id} scored {score}")
 
 if __name__ == "__main__":
     db_manager = DatabaseManager()

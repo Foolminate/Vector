@@ -2,7 +2,9 @@ import sqlite3
 import os
 import json
 from contextlib import contextmanager
+from typing import List, Optional, Union
 from .migration_runner import MigrationRunner
+from .models import RawJobData
 
 class JobRepository:
     """
@@ -34,30 +36,57 @@ class JobRepository:
         runner = MigrationRunner(self.db_path, self.migrations_dir)
         runner.run()
 
-    def upsert_job(self, job_dict: dict):
+    def upsert_job(self, job_data: Union[dict, RawJobData]):
         """
-        Upsert a job from a scraper or other source.
+        Upsert a job and log the action atomically.
         Uses seek_job_id as the primary unique key for external jobs.
         """
+        if isinstance(job_data, RawJobData):
+            job_dict = job_data.model_dump()
+            job_dict['url'] = str(job_dict['url']) # HttpUrl to str
+        else:
+            job_dict = job_data
+
+        title = job_dict.get('title') or job_dict.get('job_title')
+        company = job_dict.get('company')
+        location = job_dict.get('location')
+        url = job_dict.get('url')
+        raw_text = job_dict.get('raw_text') or job_dict.get('raw_html')
+        seek_job_id = job_dict.get('seek_job_id') or job_dict.get('id')
+        exp_date = job_dict.get('expiration_date')
+
         with self.get_connection() as conn:
-            conn.execute('''
-                INSERT INTO jobs (
-                    job_title, company, location, url, raw_text, status, seek_job_id, expiration_date
-                ) VALUES (?, ?, ?, ?, ?, 'new', ?, datetime('now', '+30 days'))
-                ON CONFLICT(seek_job_id) DO UPDATE SET
-                    job_title = excluded.job_title,
-                    company = excluded.company,
-                    location = excluded.location,
-                    url = excluded.url,
-                    raw_text = excluded.raw_text
-            ''', (
-                job_dict.get('title'),
-                job_dict.get('company'),
-                job_dict.get('location'),
-                job_dict.get('url'),
-                job_dict.get('raw_html') or job_dict.get('raw_text'),
-                job_dict.get('seek_job_id') or job_dict.get('id')
-            ))
+            # 1. Upsert Job
+            if exp_date:
+                conn.execute('''
+                    INSERT INTO jobs (
+                        job_title, company, location, url, raw_text, status, seek_job_id, expiration_date
+                    ) VALUES (?, ?, ?, ?, ?, 'new', ?, ?)
+                    ON CONFLICT(seek_job_id) DO UPDATE SET
+                        job_title = excluded.job_title,
+                        company = excluded.company,
+                        location = excluded.location,
+                        url = excluded.url,
+                        raw_text = excluded.raw_text
+                ''', (title, company, location, url, raw_text, seek_job_id, exp_date))
+            else:
+                conn.execute('''
+                    INSERT INTO jobs (
+                        job_title, company, location, url, raw_text, status, seek_job_id, expiration_date
+                    ) VALUES (?, ?, ?, ?, ?, 'new', ?, datetime('now', '+30 days'))
+                    ON CONFLICT(seek_job_id) DO UPDATE SET
+                        job_title = excluded.job_title,
+                        company = excluded.company,
+                        location = excluded.location,
+                        url = excluded.url,
+                        raw_text = excluded.raw_text
+                ''', (title, company, location, url, raw_text, seek_job_id))
+            
+            # 2. Log Action
+            conn.execute(
+                'INSERT INTO audit_log (action, details) VALUES (?, ?)',
+                ("scrape", f"Saved/Updated job: {title} at {company} (ID: {seek_job_id})")
+            )
             conn.commit()
 
     def get_pending_triage(self, limit=50):
@@ -96,6 +125,12 @@ class JobRepository:
                     last_decision_by = ?
                 WHERE seek_job_id = ? OR id = ?
             ''', (status, score, analysis_str, decision_by, job_id, job_id))
+            
+            # Atomic Audit Log
+            conn.execute(
+                "INSERT INTO audit_log (action, details) VALUES (?, ?)",
+                ("triage", f"Job {job_id} scored {score} -> {status} by {decision_by}")
+            )
             conn.commit()
 
     def update_job_status(self, job_id, status, decision_by='human'):
@@ -107,6 +142,15 @@ class JobRepository:
                     last_decision_by = ?
                 WHERE seek_job_id = ? OR id = ?
             ''', (status, decision_by, job_id, job_id))
+            conn.commit()
+
+    def update_processing_status(self, job_id, processing_status):
+        """Update the background processing status of a job (e.g., 'idle', 'processing', 'failed-permanent')."""
+        with self.get_connection() as conn:
+            conn.execute('''
+                UPDATE jobs SET processing_status = ?
+                WHERE seek_job_id = ? OR id = ?
+            ''', (processing_status, job_id, job_id))
             conn.commit()
 
     def delete_job(self, job_id):
@@ -154,6 +198,12 @@ class JobRepository:
                         last_decision_by = ?
                     WHERE seek_job_id = ? OR id = ?
                 ''', (verdict, analysis_str, decision_by, job_id, job_id))
+            
+            # Atomic Audit Log
+            conn.execute(
+                "INSERT INTO audit_log (action, details) VALUES (?, ?)",
+                ("evaluation", f"Job {job_id} evaluated -> {verdict} by {decision_by}")
+            )
             conn.commit()
 
     def reset_for_evaluation(self, job_id):
@@ -188,13 +238,35 @@ class JobRepository:
         # ... (unchanged)
         pass
 
-    def update_processing_status(self, job_id, processing_status):
-        """Update the background processing status (idle, analyzing, error)."""
+    def archive_and_purge(self):
+        """
+        Two-stage data retention lifecycle:
+        1. Archive: Jobs > 30 days old are marked as 'archived'.
+        2. Purge: Jobs > 90 days old are hard-deleted.
+        """
         with self.get_connection() as conn:
+            # 1. Archive jobs > 30 days (that aren't already archived or shortlisted)
+            # Shortlisted jobs are kept active for human review.
             conn.execute('''
-                UPDATE jobs SET processing_status = ?
-                WHERE seek_job_id = ? OR id = ?
-            ''', (processing_status, job_id, job_id))
+                UPDATE jobs 
+                SET status = 'archived' 
+                WHERE created_at < datetime('now', '-30 days') 
+                AND status NOT IN ('archived', 'shortlisted')
+            ''')
+            
+            # 2. Hard-delete jobs > 90 days
+            # First, find the seek_job_ids to clean up audit logs
+            cursor = conn.execute("SELECT seek_job_id FROM jobs WHERE created_at < datetime('now', '-90 days')")
+            ids_to_purge = [row['seek_job_id'] for row in cursor.fetchall() if row['seek_job_id']]
+            for seek_id in ids_to_purge:
+                conn.execute("DELETE FROM audit_log WHERE details LIKE ?", (f"%{seek_id}%",))
+                
+            conn.execute("DELETE FROM jobs WHERE created_at < datetime('now', '-90 days')")
+            
+            conn.execute(
+                "INSERT INTO audit_log (action, details) VALUES (?, ?)",
+                ("maintenance", f"Retention run complete. Purged {len(ids_to_purge)} jobs.")
+            )
             conn.commit()
 
 class DatabaseManager(JobRepository):

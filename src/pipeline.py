@@ -4,6 +4,7 @@ from abc import ABC, abstractmethod
 from pydantic import BaseModel
 from .database import JobRepository
 from .llm_client import ModelAdapter
+from .models import TriageResult, EvaluationResult
 
 class BaseStrategy(ABC):
     """Base class for AI pipeline strategies."""
@@ -69,10 +70,6 @@ class AgentPipeline:
 
 # --- Specific Strategies ---
 
-class TriageResult(BaseModel):
-    score: int
-    reason: str
-
 class TriageStrategy(BaseStrategy):
     """
     Implements the Triage (Sorter) stage of the pipeline.
@@ -124,12 +121,6 @@ class TriageStrategy(BaseStrategy):
             analysis={"reason": result.reason},
             decision_by=self.decision_by
         )
-
-class EvaluationResult(BaseModel):
-    suitability_score: int
-    pros: List[str]
-    cons: List[str]
-    verdict: str # 'shortlisted', 'edge-case', 'discarded'
 
 class EvaluationStrategy(BaseStrategy):
     """

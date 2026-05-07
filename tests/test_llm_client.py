@@ -1,4 +1,5 @@
 import pytest
+import httpx
 from unittest.mock import MagicMock, patch
 from src.llm_client import LLMClient
 from src.database import DatabaseManager
@@ -50,8 +51,8 @@ def test_llm_client_retries_on_error(mock_db):
         mock_response.usage_metadata.total_token_count = 10
         
         mock_client.models.generate_content.side_effect = [
-            Exception("API Down"),
-            Exception("API Still Down"),
+            httpx.ConnectError("API Down"),
+            httpx.ConnectError("API Still Down"),
             mock_response
         ]
         
